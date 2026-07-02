@@ -1,0 +1,2406 @@
+/**
+ * PRODUCTION FLOW TRACKER — Romero Home Pvt. Ltd.
+ * Production + Packing(manual) + Repair + PO + Orders/Packing + QC + Contractor Balance + Login/Abilities/Audit.
+ * No invoice/GST. Contractor balance in BORA. Packing manual = IN. Packing-list completion = OUT (bag count = bora).
+ */
+const SS_ID = '1xdKOqIrfLKfH79GsD43iuCjyAPTr0sHMX_Pnywqm6MU';
+const SHEETS = { LEDGER:'LEDGER', WIP:'WIP', REPAIR:'REPAIR', USERS:'USERS', AUDIT:'AUDIT LOG', ORDERS:'ORDERS', PACKING:'PACKING', PLISTS:'PACKING LISTS', QCSESS:'QC SESSIONS', QCPIECE:'QC PIECES', QCCOLS:'QC COLUMNS', QCCONTR:'QC CONTRACTORS', POLOG:'PO LOG', CLEDGER:'CONTRACTOR LEDGER' };
+const PRODUCTION_DEPARTMENTS = ['Raschel (Gray)','Pre-finishing','Printing','Post-finishing','Packing'];
+const PACKING_DEPT = 'Packing';
+const DISPATCH_DEPT = 'Dispatching';
+const ITEMS = ['RABBIT (S)','RHINO (L)','ROOSTER (R)','PEACHES (SS)','PANDA (LL)','MUSAFIR (A)','AQUA (W)'];
+const ROLL_KG = {'RABBIT (S)':98,'RHINO (L)':120,'ROOSTER (R)':140,'PEACHES (SS)':100,'PANDA (LL)':120,'MUSAFIR (A)':112,'AQUA (W)':105};
+const BORE_KG = 43;
+const COMPANY_GSTIN = '06AAKCR3911L1Z6';
+const COMPANY_ADDRESS = '1, Near Victor International School, Village Barsat';
+const QC_DEFAULT_COLUMNS = ['Printing','Feel','Slitting Fault','Satin','Roughness','Mending'];
+
+var _SS_CACHE=null; var _SETUP={};
+function getSS(){ if(_SS_CACHE) return _SS_CACHE; _SS_CACHE = SS_ID ? SpreadsheetApp.openById(SS_ID) : SpreadsheetApp.getActiveSpreadsheet(); return _SS_CACHE; }
+function round(n){ return Math.round((Number(n)||0)*100)/100; }
+function dateKey(d){ return (d instanceof Date) ? Utilities.formatDate(d,Session.getScriptTimeZone(),'yyyy-MM-dd') : String(d||''); }
+function pad4(n){ return ('000'+n).slice(-4); }
+function yes_(v){ const s=String(v||'').trim().toLowerCase(); return s==='yes'||s==='y'; }
+
+/* ---------- SETUP ---------- */
+function setupSystem(){
+  const ss=getSS();
+  let led=ss.getSheetByName(SHEETS.LEDGER)||ss.insertSheet(SHEETS.LEDGER); led.clear();
+  const headers=['Timestamp','Date','Department','Item','Received (rolls)','Received (kg)','Forwarded (rolls)','Forwarded (kg)','Wastage (kg)','WIP (rolls)','WIP (kg)','Entry By','Notes'];
+  led.getRange(1,1,1,headers.length).setValues([headers]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); led.setFrozenRows(1);
+  let wip=ss.getSheetByName(SHEETS.WIP)||ss.insertSheet(SHEETS.WIP); wip.clear();
+  wip.getRange(1,1,1,5).setValues([['Department','Item','WIP (rolls)','WIP (kg)','Last Updated']]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); wip.setFrozenRows(1);
+  setupRepair(); setupAuth(); setupOrders(); setupQC(); setupContractorLedger();
+  Logger.log('Setup complete.');
+}
+function setupContractorLedger(){
+  const ss=getSS();
+  if(!ss.getSheetByName(SHEETS.CLEDGER)){
+    const c=ss.insertSheet(SHEETS.CLEDGER);
+    const h=['Timestamp','Date','Contractor','Item','Direction','Bore','Source','Ref','By'];
+    c.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); c.setFrozenRows(1);
+  }
+  const u=ss.getSheetByName(SHEETS.USERS);
+  if(u){ addColIfMissing_(u,'Contractor Balance'); defaultFillCol_(u,'Contractor Balance','No'); }
+  Logger.log('Contractor ledger ready.');
+}
+function setupRepair(){
+  const ss=getSS();
+  const u0=ss.getSheetByName(SHEETS.USERS); if(u0){ addColIfMissing_(u0,'Purchase'); addColIfMissing_(u0,'Field Guy'); defaultFillCol_(u0,'Purchase','No'); defaultFillCol_(u0,'Field Guy','No'); }
+  if(!ss.getSheetByName(SHEETS.REPAIR)){
+    const r=ss.insertSheet(SHEETS.REPAIR);
+    const h=['Repair ID','Timestamp','Type','Part Name','Qty','Photo URL','Requested By','Status','Store By','Purchased By','Gate By','Gate Time','Last Challan URL','Notes','PO URL'];
+    r.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); r.setFrozenRows(1);
+  } else { addColIfMissing_(ss.getSheetByName(SHEETS.REPAIR),'PO URL'); }
+  const rsh=ss.getSheetByName(SHEETS.REPAIR); if(rsh){ addColIfMissing_(rsh,'Department'); addColIfMissing_(rsh,'Gate Photo URL'); }
+  if(!ss.getSheetByName(SHEETS.POLOG)){
+    const p=ss.insertSheet(SHEETS.POLOG);
+    const h=['PO No','Date','Repair ID','Supplier','Supplier GSTIN','Supplier Phone','Part','Qty','Unit Price','GST %','Total','Delivery Days','Remark','Created By','PO URL'];
+    p.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); p.setFrozenRows(1);
+  }
+}
+function setupAuth(){
+  const ss=getSS();
+  if(!ss.getSheetByName(SHEETS.USERS)){
+    const u=ss.insertSheet(SHEETS.USERS);
+    u.getRange(1,1,1,13).setValues([['Name','PIN','Departments','Dispatch','Dashboard','Daily','Item Journey','Repair Request','Store','Security','Order Entry','Packing','Active']]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff');
+    u.getRange(2,1,4,13).setValues([
+      ['Ankit','1234','ALL','Yes','Yes','Yes','Yes','Yes','Yes','Yes','Yes','Yes','Yes'],
+      ['Nadeem','3333','Raschel (Gray)','No','No','No','Yes','Yes','No','No','No','No','Yes'],
+      ['Ravi','1111','','Yes','No','No','No','No','No','Yes','No','No','Yes'],
+      ['Imran','4444','Printing, Post-finishing','No','No','No','No','Yes','No','No','No','No','Yes']
+    ]);
+    u.setFrozenRows(1); u.autoResizeColumns(1,13);
+  }
+  if(!ss.getSheetByName(SHEETS.AUDIT)){
+    const a=ss.insertSheet(SHEETS.AUDIT);
+    a.getRange(1,1,1,5).setValues([['Timestamp','User','Departments','Action','Detail']]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); a.setFrozenRows(1);
+  }
+}
+function addColIfMissing_(sh,label){
+  const head=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  if(head.indexOf(label.toLowerCase())<0){ const c=sh.getLastColumn()+1; sh.getRange(1,c).setValue(label).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); }
+}
+function defaultFillCol_(sh,label,value){
+  const head=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const c=head.indexOf(label.toLowerCase()); if(c<0) return;
+  const rows=sh.getLastRow()-1; if(rows<=0) return;
+  const rng=sh.getRange(2,c+1,rows,1); const vals=rng.getValues(); let blank=true;
+  vals.forEach(function(r){ if(String(r[0]).trim()!=='') blank=false; });
+  if(blank) rng.setValue(value);
+}
+function setupOrders(){
+  if(_SETUP.setupOrders) return; _SETUP.setupOrders=true;
+  const ss=getSS();
+  if(!ss.getSheetByName(SHEETS.ORDERS)){
+    const o=ss.insertSheet(SHEETS.ORDERS);
+    const h=['Order ID','Date','Customer','Order Details','Status','Punched By','Accepted By','Completed By','Slip No','Packing List URL','Notes','Contractor','Tempu'];
+    o.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); o.setFrozenRows(1);
+  } else {
+    const o=ss.getSheetByName(SHEETS.ORDERS);
+    addColIfMissing_(o,'Contractor'); addColIfMissing_(o,'Tempu');
+  }
+  if(!ss.getSheetByName(SHEETS.PACKING)){
+    const p=ss.insertSheet(SHEETS.PACKING);
+    const h=['Order ID','Bag No','Quality','Weight (kg)','Packed By','Timestamp','Token'];
+    p.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); p.setFrozenRows(1);
+  }
+  if(!ss.getSheetByName(SHEETS.PLISTS)){
+    const pl=ss.insertSheet(SHEETS.PLISTS);
+    pl.getRange(1,1,1,3).setValues([['PACKING LISTS — each completed list saved in full (do not edit)','','']]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); pl.setFrozenRows(1);
+  }
+  const u=ss.getSheetByName(SHEETS.USERS);
+  if(u){ addColIfMissing_(u,'Order Entry'); addColIfMissing_(u,'Packing'); defaultFillCol_(u,'Order Entry','No'); defaultFillCol_(u,'Packing','No'); }
+}
+function setupQC(){
+  const ss=getSS();
+  if(!ss.getSheetByName(SHEETS.QCSESS)){
+    const s=ss.insertSheet(SHEETS.QCSESS);
+    const h=['QC ID','Order ID','Bag Ref','Quality','Contractor','Inspector','Status','Started','Completed','Pieces','Total Weight'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+  if(!ss.getSheetByName(SHEETS.QCPIECE)){
+    const p=ss.insertSheet(SHEETS.QCPIECE);
+    const h=['QC ID','Sr No','Colour','Size','Weight','Remark','Checks (JSON)','Photo URL','Inspector','Timestamp','Token'];
+    p.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); p.setFrozenRows(1);
+  }
+  if(!ss.getSheetByName(SHEETS.QCCOLS)){
+    const c=ss.insertSheet(SHEETS.QCCOLS);
+    c.getRange(1,1,1,1).setValues([['Check Column (edit this list freely)']]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); c.setFrozenRows(1);
+    const seed=QC_DEFAULT_COLUMNS.map(function(x){return [x];});
+    c.getRange(2,1,seed.length,1).setValues(seed);
+  }
+  if(!ss.getSheetByName(SHEETS.QCCONTR)){
+    const c=ss.insertSheet(SHEETS.QCCONTR);
+    c.getRange(1,1,1,1).setValues([['Contractor']]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); c.setFrozenRows(1);
+    c.getRange(2,1,2,1).setValues([['Ravi'],['Sandeep']]);
+  }
+  const u=ss.getSheetByName(SHEETS.USERS);
+  if(u){ addColIfMissing_(u,'QC'); defaultFillCol_(u,'QC','No'); }
+}
+
+function doGet(){
+  return HtmlService.createTemplateFromFile('Index').evaluate()
+    .setTitle('Production Flow Tracker').addMetaTag('viewport','width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+function include(name){ return HtmlService.createHtmlOutputFromFile(name).getContent(); }
+
+/* ---------- AUTH ---------- */
+function getUser_(name){
+  const sh=getSS().getSheetByName(SHEETS.USERS); if(!sh) return null;
+  const data=sh.getDataRange().getValues();
+  const head=data[0].map(function(h){return String(h||'').trim().toLowerCase();});
+  function col(label){ return head.indexOf(String(label).toLowerCase()); }
+  const cPin=col('PIN'), cDept=col('Departments'), cActive=col('Active');
+  const abilityMap={'dispatch':'dispatch','dashboard':'dashboard','daily':'daily','item journey':'item_journey','repair request':'repair_request','store':'store','security':'security','order entry':'order_entry','packing':'packing','qc':'qc','contractor balance':'contractor_balance','purchase':'purchase','field guy':'field_guy','inward':'inward','mdo':'mdo','costing':'costing'};
+  for(let i=1;i<data.length;i++){
+    if(String(data[i][0]).trim().toLowerCase()===String(name||'').trim().toLowerCase()){
+      const deptRaw=String(cDept>=0?data[i][cDept]:'').trim();
+      const allDepts=deptRaw.toUpperCase()==='ALL';
+      const depts=allDepts?PRODUCTION_DEPARTMENTS.slice():deptRaw.split(',').map(function(x){return x.trim();}).filter(Boolean);
+      const can={dispatch:false,dashboard:false,daily:false,item_journey:false,repair_request:false,store:false,security:false,order_entry:false,packing:false,qc:false,contractor_balance:false,purchase:false,field_guy:false,inward:false,mdo:false,costing:false};
+      Object.keys(abilityMap).forEach(function(h){ const ci=col(h); if(ci>=0) can[abilityMap[h]]=yes_(data[i][ci]); });
+      return { name:String(data[i][0]).trim(), pin:String(cPin>=0?data[i][cPin]:'').trim(), allDepts:allDepts, departments:depts, can:can, active:yes_(cActive>=0?data[i][cActive]:'') };
+    }
+  }
+  return null;
+}
+function requireUser_(name){ const u=getUser_(name); if(!u||!u.active) throw new Error('Not logged in or inactive.'); return u; }
+function requireCan_(name,ability){ const u=requireUser_(name); if(!u.can[ability]) throw new Error('You are not allowed to do this.'); return u; }
+function requireDept_(name,dept){ const u=requireUser_(name); if(u.departments.indexOf(dept)<0) throw new Error('You cannot enter for '+dept+'.'); return u; }
+function logAudit_(u,action,detail){ let sh=getSS().getSheetByName(SHEETS.AUDIT); if(!sh){setupAuth();sh=getSS().getSheetByName(SHEETS.AUDIT);} sh.appendRow([new Date(),u.name,u.allDepts?'ALL':u.departments.join(','),action,detail||'']); }
+
+function login(name,pin){
+  const u=getUser_(name);
+  if(!u) return {ok:false,msg:'User not found'};
+  if(!u.active) return {ok:false,msg:'User is inactive'};
+  if(String(u.pin)!==String(pin)) return {ok:false,msg:'Wrong PIN'};
+  logAudit_(u,'Login','');
+  return {ok:true,name:u.name,departments:u.departments,allDepts:u.allDepts,can:u.can};
+}
+function getConfig(){ return {departments:PRODUCTION_DEPARTMENTS,packingDept:PACKING_DEPT,dispatchDept:DISPATCH_DEPT,items:ITEMS,rollKg:ROLL_KG,boreKg:BORE_KG}; }
+
+/* ---------- CONTRACTOR LEDGER ---------- */
+function cledgerAdd_(contractor,item,direction,bore,source,ref,by){
+  setupContractorLedger();
+  const sh=getSS().getSheetByName(SHEETS.CLEDGER);
+  sh.appendRow([new Date(),dateKey(new Date()),String(contractor||'').trim(),String(item||'').trim(),direction,round(bore),source||'',ref||'',by||'']);
+}
+function getContractorList_(){ const c=getSS().getSheetByName(SHEETS.QCCONTR); if(!c) return []; const d=c.getDataRange().getValues(); const out=[]; for(let i=1;i<d.length;i++){ const v=String(d[i][0]||'').trim(); if(v) out.push(v); } return out; }
+function getContractorOptions(user){ requireUser_(user); setupQC(); return {contractors:getContractorList_()}; }
+function getContractorBalance(user){
+  requireCan_(user,'contractor_balance'); setupContractorLedger();
+  const data=getSS().getSheetByName(SHEETS.CLEDGER).getDataRange().getValues();
+  const map={};
+  for(let i=1;i<data.length;i++){
+    const c=String(data[i][2]||'').trim(); const item=String(data[i][3]||'').trim(); if(!c||!item) continue;
+    const dir=String(data[i][4]||'').trim(); const bore=Number(data[i][5])||0;
+    map[c]=map[c]||{}; map[c][item]=map[c][item]||{packed:0,disp:0};
+    if(dir==='IN') map[c][item].packed+=bore; else map[c][item].disp+=bore;
+  }
+  const out=[];
+  Object.keys(map).sort().forEach(function(c){
+    const items=[]; let tPacked=0,tDisp=0;
+    Object.keys(map[c]).sort().forEach(function(it){
+      const p=round(map[c][it].packed), d=round(map[c][it].disp), b=round(p-d);
+      items.push({item:it,packed:p,disp:d,balance:b}); tPacked+=p; tDisp+=d;
+    });
+    out.push({contractor:c,items:items,totPacked:round(tPacked),totDisp:round(tDisp),totBalance:round(tPacked-tDisp)});
+  });
+  return out;
+}
+
+/* ---------- PRODUCTION ---------- */
+function getSuggestedReceived(user,department,item){
+  requireDept_(user,department);
+  const order=PRODUCTION_DEPARTMENTS, idx=order.indexOf(department);
+  const data=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+  const I=String(item||'').trim().toLowerCase(), w=ROLL_KG[item]||0;
+  let myR=0,myF=0;
+  for(let i=1;i<data.length;i++){ if(String(data[i][3]).trim().toLowerCase()!==I) continue; if(data[i][2]===department){ myR+=Number(data[i][4])||0; myF+=Number(data[i][6])||0; } }
+  const myWipRolls=round(myR-myF), myWipKg=round(myWipRolls*w);
+  if(idx<=0) return {first:true,suggested:0,myWipRolls:myWipRolls,myWipKg:myWipKg};
+  const prev=order[idx-1]; let prevFwd=0;
+  for(let i=1;i<data.length;i++){ if(String(data[i][3]).trim().toLowerCase()!==I) continue; if(data[i][2]===prev) prevFwd+=Number(data[i][6])||0; }
+  let s=prevFwd-myR; if(s<0)s=0;
+  return {first:false,prev:prev,suggested:round(s),myWipRolls:myWipRolls,myWipKg:myWipKg};
+}
+function submitEntries(e){
+  const u=requireDept_(e.user,e.department);
+  const led=getSS().getSheetByName(SHEETS.LEDGER); const date=e.date||dateKey(new Date()); const items=e.items||[]; const isPacking=(e.department===PACKING_DEPT); let saved=0;
+  var rows=[];
+  items.forEach(function(it){ const item=String(it.item||'').trim(); if(!item) return; const w=ROLL_KG[item]||0; const rR=round(it.received), fR=isPacking?0:round(it.forwarded); const rK=round(rR*w), fK=round(fR*w); rows.push([new Date(),date,e.department||'',item,rR,rK,fR,fK,0,round(rR-fR),round(rK-fK),u.name,'']); saved++; });
+  const wastage=round(e.wastage); if(wastage>0){ rows.push([new Date(),date,e.department||'','(Wastage)',0,0,0,0,wastage,0,round(-wastage),u.name,'']); saved++; }
+  if(rows.length) led.getRange(led.getLastRow()+1,1,rows.length,rows[0].length).setValues(rows);
+  logAudit_(u,'Production Entry',e.department+' — '+saved+' rows');
+  return {ok:true,saved:saved};
+}
+function submitDispatch(e){
+  const u=requireCan_(e.user,'dispatch');
+  const led=getSS().getSheetByName(SHEETS.LEDGER); const date=e.date||dateKey(new Date()); const items=e.items||[]; let saved=0;
+  var rows=[];
+  items.forEach(function(it){ const item=String(it.item||'').trim(); if(!item) return; const bores=round(it.bores), qty=round(bores*BORE_KG); rows.push([new Date(),date,DISPATCH_DEPT,item,0,0,0,qty,0,0,round(-qty),u.name,'Packed (manual) Bores: '+bores]);
+    cledgerAdd_(u.name,item,'IN',bores,'Packing (manual)','',u.name); saved++; });
+  if(rows.length) led.getRange(led.getLastRow()+1,1,rows.length,rows[0].length).setValues(rows);
+  logAudit_(u,'Packing (manual)',saved+' items (+contractor balance)');
+  return {ok:true,saved:saved};
+}
+function refreshWIP(){
+  const ss=getSS(), led=ss.getSheetByName(SHEETS.LEDGER), wip=ss.getSheetByName(SHEETS.WIP);
+  const data=led.getDataRange().getValues(); const mapR={},mapK={};
+  for(let i=1;i<data.length;i++){ const dept=data[i][2],item=data[i][3]; if(!dept||!item) continue; const k=dept+'||'+item; mapR[k]=(mapR[k]||0)+((Number(data[i][4])||0)-(Number(data[i][6])||0)); mapK[k]=(mapK[k]||0)+((Number(data[i][5])||0)-(Number(data[i][7])||0)-(Number(data[i][8])||0)); }
+  const order=PRODUCTION_DEPARTMENTS.concat([DISPATCH_DEPT]);
+  const rows=Object.keys(mapK).map(function(k){ const p=k.split('||'); return {dept:p[0],item:p[1],r:round(mapR[k]||0),kg:round(mapK[k])}; });
+  rows.sort(function(a,b){ const oa=order.indexOf(a.dept),ob=order.indexOf(b.dept); return oa!==ob?oa-ob:(a.item<b.item?-1:1); });
+  const out=rows.map(function(r){ return [r.dept,r.item,r.r,r.kg,new Date()]; });
+  const mr=wip.getMaxRows(); if(mr>1) wip.getRange(2,1,mr-1,5).clearContent();
+  if(out.length) wip.getRange(2,1,out.length,5).setValues(out);
+}
+function getDashboard(user){
+  requireCan_(user,'dashboard');
+  const order=PRODUCTION_DEPARTMENTS; const data=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+  const acc={},recvR={},fwdR={},packR={},packK={},disK={},disBore={},disSup={};
+  for(let i=1;i<data.length;i++){ const dept=data[i][2],item=data[i][3]; if(!dept||!item) continue; const rR=Number(data[i][4])||0,rK=Number(data[i][5])||0,fR=Number(data[i][6])||0,fK=Number(data[i][7])||0,wst=Number(data[i][8])||0;
+    acc[dept]=acc[dept]||{}; acc[dept][item]=acc[dept][item]||{r:0,kg:0}; acc[dept][item].r+=(rR-fR); acc[dept][item].kg+=(rK-fK-wst);
+    recvR[dept]=recvR[dept]||{}; recvR[dept][item]=(recvR[dept][item]||0)+rR; fwdR[dept]=fwdR[dept]||{}; fwdR[dept][item]=(fwdR[dept][item]||0)+fR;
+    if(dept===PACKING_DEPT&&item!=='(Wastage)'){ packR[item]=(packR[item]||0)+(rR-fR); packK[item]=(packK[item]||0)+(rK-fK); }
+    if(dept===DISPATCH_DEPT){ disK[item]=(disK[item]||0)+fK; disBore[item]=(disBore[item]||0)+(fK/BORE_KG); const s=String(data[i][11]||'').trim()||'—'; disSup[s]=(disSup[s]||0)+fK; } }
+  const departments=order.map(function(d){ const items=Object.keys(acc[d]||{}).filter(function(it){return it!=='(Wastage)';}).map(function(it){ return {item:it,r:round(acc[d][it].r),kg:round(acc[d][it].kg)}; }); const totR=items.reduce(function(s,x){return s+x.r;},0),totK=items.reduce(function(s,x){return s+x.kg;},0); return {name:d,items:items,totR:round(totR),totK:round(totK)}; }).filter(function(d){return d.items.length>0;});
+  const allItems={}; Object.keys(packK).forEach(function(k){allItems[k]=1;}); Object.keys(disK).forEach(function(k){allItems[k]=1;});
+  const ready=Object.keys(allItems).map(function(it){ return {item:it,rolls:round(packR[it]||0),kg:round((packK[it]||0)-(disK[it]||0))}; }).filter(function(x){return x.rolls>0.001||x.kg>0.001;});
+  const dispList=Object.keys(disK).map(function(it){ return {item:it,kg:round(disK[it]),bores:round(disBore[it])}; }).filter(function(x){return x.kg>0.001;});
+  const dispSup=Object.keys(disSup).map(function(s){ return {name:s,kg:round(disSup[s]),bores:round(disSup[s]/BORE_KG)}; }).filter(function(x){return x.kg>0.001;});
+  const recon=[]; for(let i=0;i<order.length-1;i++){ const A=order[i],B=order[i+1],its={}; Object.keys(fwdR[A]||{}).forEach(function(k){its[k]=1;}); Object.keys(recvR[B]||{}).forEach(function(k){its[k]=1;}); Object.keys(its).forEach(function(it){ if(it==='(Wastage)') return; const f=round((fwdR[A]||{})[it]||0),r=round((recvR[B]||{})[it]||0); if(Math.abs(f-r)>0.01) recon.push({from:A,to:B,item:it,forwarded:f,received:r,diff:round(f-r)}); }); }
+  return {departments:departments,ready:ready,dispatched:dispList,dispatchedBySup:dispSup,recon:recon};
+}
+function getItemTrace(user,item){
+  requireCan_(user,'item_journey');
+  const order=PRODUCTION_DEPARTMENTS.concat([DISPATCH_DEPT]); const data=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+  const want=String(item||'').trim().toLowerCase(); const map={};
+  for(let i=1;i<data.length;i++){ if(String(data[i][3]).trim().toLowerCase()!==want) continue; const dept=data[i][2]; if(!dept) continue; map[dept]=map[dept]||{rR:0,rK:0,fR:0,fK:0,wst:0}; map[dept].rR+=Number(data[i][4])||0; map[dept].rK+=Number(data[i][5])||0; map[dept].fR+=Number(data[i][6])||0; map[dept].fK+=Number(data[i][7])||0; map[dept].wst+=Number(data[i][8])||0; }
+  return order.filter(function(d){return map[d];}).map(function(d){ const m=map[d]; return {dept:d,recvR:round(m.rR),recvK:round(m.rK),fwdR:round(m.fR),fwdK:round(m.fK),wipR:round(m.rR-m.fR),wipK:round(m.rK-m.fK-m.wst)}; });
+}
+function getDailyReport(user,dateStr){
+  requireCan_(user,'daily');
+  const data=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues(); const map={};
+  for(let i=1;i<data.length;i++){ if(dateKey(data[i][1])!==dateStr) continue; const dept=data[i][2]; if(!dept) continue; map[dept]=map[dept]||{rR:0,rK:0,fR:0,fK:0,wst:0}; map[dept].rR+=Number(data[i][4])||0; map[dept].rK+=Number(data[i][5])||0; map[dept].fR+=Number(data[i][6])||0; map[dept].fK+=Number(data[i][7])||0; map[dept].wst+=Number(data[i][8])||0; }
+  const order=PRODUCTION_DEPARTMENTS.concat([DISPATCH_DEPT]);
+  return order.filter(function(d){return map[d];}).map(function(d){ const m=map[d]; return {dept:d,recvR:round(m.rR),recvK:round(m.rK),fwdR:round(m.fR),fwdK:round(m.fK),wst:round(m.wst)}; });
+}
+
+/* ---------- REPAIR ---------- */
+function getFolder_(name){ const it=DriveApp.getFoldersByName(name); return it.hasNext()?it.next():DriveApp.createFolder(name); }
+function savePhotoTo_(base64,name,folder){ const data=(base64.indexOf(',')>=0)?base64.split(',')[1]:base64; const blob=Utilities.newBlob(Utilities.base64Decode(data),'image/jpeg',name||'p.jpg'); const file=getFolder_(folder||'Romero Repair Photos').createFile(blob); file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW); return file.getUrl(); }
+function savePhoto_(base64,name){ return savePhotoTo_(base64,name,'Romero Repair Photos'); }
+function submitRepairRequest(e){
+  const u=requireCan_(e.user,'repair_request'); setupRepair();
+  const dept=String(e.department||'').trim(); if(!dept) return {ok:false,msg:'Enter department / machine / location'};
+  const sh=getSS().getSheetByName(SHEETS.REPAIR); const id='RM-'+pad4(Math.max(0,sh.getLastRow()-1)+1);
+  let photoUrl=e.photoData?savePhoto_(e.photoData,id+'.jpg'):'';
+  sh.appendRow([id,new Date(),e.type||'',String(e.part||'').trim(),e.qty||'',photoUrl,u.name,'Requested','','','','','',e.notes||'','']);
+  const head=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cDept=head.indexOf('department'); if(cDept>=0) sh.getRange(sh.getLastRow(),cDept+1).setValue(dept);
+  logAudit_(u,'Repair Request',id+' · '+e.type+' · '+e.part+' · '+dept);
+  return {ok:true,id:id};
+}
+function getRepairList(user){
+  const u=requireUser_(user); if(!(u.can.repair_request||u.can.store||u.can.security||u.can.purchase||u.can.field_guy)) throw new Error('No repair access.');
+  setupRepair(); const sh=getSS().getSheetByName(SHEETS.REPAIR); const data=sh.getDataRange().getValues();
+  const head=data[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cPO=head.indexOf('po url');
+  const cDept=head.indexOf('department');
+  const cGP=head.indexOf('gate photo url');
+  const rows=[];
+  for(let i=1;i<data.length;i++){ if(!data[i][0]) continue; rows.push({id:data[i][0],time:(data[i][1] instanceof Date)?Utilities.formatDate(data[i][1],Session.getScriptTimeZone(),'dd-MMM HH:mm'):'',type:data[i][2],part:data[i][3],qty:data[i][4],photo:data[i][5],requestedBy:data[i][6],status:data[i][7],challan:data[i][12],po:(cPO>=0?data[i][cPO]:''),department:(cDept>=0?data[i][cDept]:''),gatePhoto:(cGP>=0?data[i][cGP]:'')}); }
+  rows.reverse(); return rows;
+}
+function findRepairRow_(id){ const sh=getSS().getSheetByName(SHEETS.REPAIR); const d=sh.getDataRange().getValues(); for(let i=1;i<d.length;i++){ if(d[i][0]===id) return {sh:sh,row:i+1,data:d[i]}; } return null; }
+function storeDecision(user,id,decision){ const u=requireCan_(user,'store'); const f=findRepairRow_(id); if(!f) return {ok:false,msg:'Not found'}; if(f.data[2]!=='New Part'||f.data[7]!=='Requested') return {ok:false,msg:'Not allowed at this stage'}; const status=(decision==='available')?'Issued from Store':'To Purchase'; f.sh.getRange(f.row,8).setValue(status); f.sh.getRange(f.row,9).setValue(u.name); logAudit_(u,'Store Decision',id+' → '+status); return {ok:true,status:status}; }
+function markPurchased(user,id){ const u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.field_guy) throw new Error('Only Field Guy can mark purchased.'); const f=findRepairRow_(id); if(!f) return {ok:false,msg:'Not found'}; if(f.data[7]!=='PO Created') return {ok:false,msg:'PO must be created first'}; f.sh.getRange(f.row,8).setValue('Purchased'); f.sh.getRange(f.row,10).setValue(u.name); logAudit_(u,'Marked Purchased',id); return {ok:true,status:'Purchased'}; }
+function gateAction(user,id,photoData){ const u=requireCan_(user,'security'); const f=findRepairRow_(id); if(!f) return {ok:false,msg:'Not found'}; const type=f.data[2],status=f.data[7]; let ns='',dir=''; if(type==='New Part'&&status==='Purchased'){ return {ok:false,msg:'Spare part ka inward — Inward tab → Open POs me bill detail ke saath karein.'}; } else if(type==='Repair'&&status==='Requested'){ns='Out for Repair';dir='OUT';} else if(type==='Repair'&&status==='Out for Repair'){ns='Returned';dir='IN';} else return {ok:false,msg:'No gate action at this stage'}; var gatePhotoUrl=photoData?savePhotoTo_(photoData,id+'_gate_'+dir+'.jpg','Romero Gate Photos'):''; const challanUrl=makeChallan_({id:f.data[0],type:type,part:f.data[3],qty:f.data[4],requestedBy:f.data[6],gateBy:u.name,photo:gatePhotoUrl},dir); f.sh.getRange(f.row,8).setValue(ns); f.sh.getRange(f.row,11).setValue(u.name); f.sh.getRange(f.row,12).setValue(new Date()); f.sh.getRange(f.row,13).setValue(challanUrl); var head=f.sh.getRange(1,1,1,f.sh.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();}); var cGP=head.indexOf('gate photo url'); if(cGP>=0) f.sh.getRange(f.row,cGP+1).setValue(gatePhotoUrl); logAudit_(u,'Gate '+dir,id+' → '+ns); return {ok:true,status:ns,dir:dir,challan:challanUrl}; }
+function makeChallan_(r,dir){ const now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'dd-MMM-yyyy HH:mm'); const dl=(dir==='OUT')?'GATE PASS — OUTWARD':'GATE PASS — INWARD'; const html='<div style="font-family:Arial;padding:28px;color:#111;"><div style="text-align:center;border-bottom:3px solid #0f2942;padding-bottom:10px;"><div style="font-size:22px;font-weight:bold;letter-spacing:1px;">ROMERO HOME PVT. LTD.</div><div style="font-size:13px;color:#555;">Repair &amp; Maintenance — Gate Challan</div></div><div style="text-align:center;margin:14px 0;font-size:16px;font-weight:bold;color:'+(dir==='OUT'?'#b45309':'#0e7a55')+';">'+dl+'</div><table style="width:100%;font-size:14px;border-collapse:collapse;">'+row_('Challan No',r.id+' / '+dir)+row_('Date &amp; Time',now)+row_('Type',r.type)+row_('Part Name',r.part)+row_('Quantity',r.qty)+row_('Requested By',r.requestedBy)+row_('Gate (Security)',r.gateBy)+(r.photo?row_('Gate Photo',r.photo):'')+'</table><div style="margin-top:50px;display:flex;justify-content:space-between;font-size:13px;"><div>______________________<br>Security Guard</div><div>______________________<br>Authorised Sign</div></div></div>'; const pdf=Utilities.newBlob(html,'text/html','c.html').getAs('application/pdf'); pdf.setName('Challan_'+r.id+'_'+dir+'.pdf'); const file=getFolder_('Romero Challans').createFile(pdf); file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW); return file.getUrl(); }
+function row_(k,v){ return '<tr><td style="padding:7px 8px;border:1px solid #ddd;background:#f4f6f9;font-weight:bold;width:40%;">'+k+'</td><td style="padding:7px 8px;border:1px solid #ddd;">'+(v||'')+'</td></tr>'; }
+
+/* ---------- PURCHASE ORDER ---------- */
+function createPO(e){
+  const u=requireUser_(e.user); if(!isAllAdmin_(e.user)&&!u.can.purchase) throw new Error('Only Purchase can create PO.'); setupRepair();
+  const f=findRepairRow_(e.repairId); if(!f) return {ok:false,msg:'Repair item not found'};
+  if(f.data[7]!=='To Purchase'&&f.data[7]!=='PO Created') return {ok:false,msg:'PO only for To-Purchase items'};
+  const poNo=String(e.poNo||'').trim(); if(!poNo) return {ok:false,msg:'Enter PO number'};
+  const qty=round(e.qty)||0, price=round(e.unitPrice)||0, gst=round(e.gstPct)||0;
+  const taxable=round(qty*price); const gstAmt=round(taxable*gst/100); const total=round(taxable+gstAmt);
+  const url=makePO_({ poNo:poNo, date:Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'dd-MMM-yyyy'), deliveryDays:e.deliveryDays||'', supplier:String(e.supplier||'').trim(), supplierGstin:String(e.supplierGstin||'').trim(), supplierPhone:String(e.supplierPhone||'').trim(), part:f.data[3], qty:qty, unitPrice:price, gstPct:gst, taxable:taxable, gstAmt:gstAmt, total:total, remark:String(e.remark||'').trim() });
+  const log=getSS().getSheetByName(SHEETS.POLOG);
+  log.appendRow([poNo,new Date(),e.repairId,String(e.supplier||'').trim(),String(e.supplierGstin||'').trim(),String(e.supplierPhone||'').trim(),f.data[3],qty,price,gst+'%',total,e.deliveryDays||'',String(e.remark||'').trim(),u.name,url]);
+  const head=f.sh.getRange(1,1,1,f.sh.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cPO=head.indexOf('po url'); if(cPO>=0) f.sh.getRange(f.row,cPO+1).setValue(url);
+  f.sh.getRange(f.row,8).setValue('PO Created');
+  logAudit_(u,'PO Created',e.repairId+' · PO '+poNo+' · '+f.data[3]+' · '+total);
+  return {ok:true,url:url,poNo:poNo,total:total};
+}
+function makePO_(d){
+  const rowsHtml=function(){
+    let h=''; var items=(d.items&&d.items.length)?d.items:[{item:d.part||'',qty:d.qty||0,unitPrice:d.unitPrice||0,gstPct:d.gstPct||0,taxable:d.taxable||0}];
+    for(let k=0;k<items.length;k++){ var it=items[k]; h+='<tr><td style="border:1px solid #999;padding:4px;text-align:center;">'+(k+1)+'</td><td style="border:1px solid #999;padding:4px;"></td><td style="border:1px solid #999;padding:4px;"></td><td style="border:1px solid #999;padding:4px;">'+(it.item||'')+'</td><td style="border:1px solid #999;padding:4px;"></td><td style="border:1px solid #999;padding:4px;text-align:center;">Pcs</td><td style="border:1px solid #999;padding:4px;text-align:center;">'+it.qty+'</td><td style="border:1px solid #999;padding:4px;text-align:right;">'+Number(it.unitPrice||0).toFixed(2)+'</td><td style="border:1px solid #999;padding:4px;text-align:center;">'+(it.gstPct||0)+'%</td><td style="border:1px solid #999;padding:4px;text-align:right;">'+Number(it.taxable||0).toFixed(2)+'</td></tr>'; }
+    for(let i=items.length+1;i<=12;i++){ h+='<tr><td style="border:1px solid #999;padding:4px;text-align:center;height:20px;">'+i+'</td><td style="border:1px solid #999;"></td><td style="border:1px solid #999;"></td><td style="border:1px solid #999;"></td><td style="border:1px solid #999;"></td><td style="border:1px solid #999;"></td><td style="border:1px solid #999;"></td><td style="border:1px solid #999;"></td><td style="border:1px solid #999;"></td><td style="border:1px solid #999;"></td></tr>'; }
+    return h;
+  };
+  const html=''+
+  '<div style="font-family:Arial;padding:22px;color:#111;">'+
+  '<div style="text-align:center;background:#cfcfcf;border:2px solid #555;padding:8px;font-size:20px;font-weight:bold;letter-spacing:1px;">ROMERO PURCHASE ORDER</div>'+
+  '<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:12px;">'+
+  '<tr><td style="border:1px solid #999;padding:6px;width:60%;vertical-align:top;"><b>ROMERO HOME PVT. LTD.</b><br>'+COMPANY_ADDRESS+'<br>PHONE: ____________</td>'+
+  '<td style="border:1px solid #999;padding:6px;vertical-align:top;"><table style="width:100%;font-size:12px;border-collapse:collapse;">'+
+  '<tr><td style="padding:2px;"><b>DATE</b></td><td style="padding:2px;text-align:right;">'+d.date+'</td></tr>'+
+  '<tr><td style="padding:2px;"><b>P.O.#</b></td><td style="padding:2px;text-align:right;">'+d.poNo+'</td></tr>'+
+  '<tr><td style="padding:2px;"><b>Delivery Days</b></td><td style="padding:2px;text-align:right;">'+(d.deliveryDays||'')+'</td></tr>'+
+  '<tr><td style="padding:2px;"><b>Open Ord. No</b></td><td style="padding:2px;text-align:right;"></td></tr>'+
+  '</table></td></tr></table>'+
+  '<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:12px;">'+
+  '<tr><td style="border:1px solid #999;padding:6px;width:50%;vertical-align:top;"><b>SUPPLIER NAME</b><br>'+(d.supplier||'')+'<br><br><b>GSTIN</b> '+(d.supplierGstin||'')+'<br><b>PHONE NO.</b> '+(d.supplierPhone||'')+'</td>'+
+  '<td style="border:1px solid #999;padding:6px;vertical-align:top;"><b>SHIP TO</b><br>ROMERO HOME PVT. LTD.<br>'+COMPANY_ADDRESS+'<br><b>GSTIN</b> '+COMPANY_GSTIN+'</td></tr></table>'+
+  '<table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px;">'+
+  '<tr style="background:#e6e6e6;font-weight:bold;text-align:center;"><td style="border:1px solid #999;padding:4px;">S NO</td><td style="border:1px solid #999;padding:4px;">SKU CODE</td><td style="border:1px solid #999;padding:4px;">ITEM CATEGORY</td><td style="border:1px solid #999;padding:4px;">ITEM DESCRIPTION</td><td style="border:1px solid #999;padding:4px;">SCN</td><td style="border:1px solid #999;padding:4px;">UNIT</td><td style="border:1px solid #999;padding:4px;">QTY</td><td style="border:1px solid #999;padding:4px;">UNIT PRICE</td><td style="border:1px solid #999;padding:4px;">GST %</td><td style="border:1px solid #999;padding:4px;">TOTAL</td></tr>'+
+  rowsHtml()+'</table>'+
+  '<table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:12px;">'+
+  '<tr><td style="width:60%;border:1px solid #999;padding:6px;vertical-align:top;"><b>PUT REMARK HERE</b><br>'+(d.remark||'')+'</td>'+
+  '<td style="vertical-align:top;"><table style="width:100%;border-collapse:collapse;font-size:12px;">'+
+  '<tr><td style="border:1px solid #999;padding:4px;"><b>Sub Total</b></td><td style="border:1px solid #999;padding:4px;text-align:right;">'+Number(d.taxable||0).toFixed(2)+'</td></tr>'+
+  '<tr><td style="border:1px solid #999;padding:4px;">Other Ch.</td><td style="border:1px solid #999;padding:4px;text-align:right;"></td></tr>'+
+  '<tr><td style="border:1px solid #999;padding:4px;">Discount %</td><td style="border:1px solid #999;padding:4px;text-align:right;"></td></tr>'+
+  '<tr><td style="border:1px solid #999;padding:4px;">S &amp; H</td><td style="border:1px solid #999;padding:4px;text-align:right;"></td></tr>'+
+  '<tr><td style="border:1px solid #999;padding:4px;">Freight</td><td style="border:1px solid #999;padding:4px;text-align:right;"></td></tr>'+
+  '<tr><td style="border:1px solid #999;padding:4px;">GST</td><td style="border:1px solid #999;padding:4px;text-align:right;">'+Number((d.gstAmt!=null?d.gstAmt:(Number(d.total||0)-Number(d.taxable||0)))||0).toFixed(2)+'</td></tr>'+
+  '<tr style="font-weight:bold;background:#e6e6e6;"><td style="border:2px solid #555;padding:6px;">TOTAL</td><td style="border:2px solid #555;padding:6px;text-align:right;">₹'+Number(d.total||0).toFixed(2)+'</td></tr>'+
+  '</table></td></tr></table>'+
+  '<div style="margin-top:40px;display:flex;justify-content:space-between;font-size:12px;"><div>______________________<br>Prepared By</div><div>______________________<br>Authorised Sign</div></div>'+
+  '</div>';
+  const pdf=Utilities.newBlob(html,'text/html','po.html').getAs('application/pdf'); pdf.setName('PO_'+d.poNo+'.pdf');
+  const file=getFolder_('Romero Purchase Orders').createFile(pdf); file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW);
+  return file.getUrl();
+}
+
+/* ---------- ORDERS & PACKING — partial dispatch (per-quality bora targets, accumulating dispatches) ---------- */
+const DISPATCHES_SHEET = 'DISPATCHES';
+
+function ensureOrders_(){
+  if(_SETUP.orders) return; _SETUP.orders=true;
+  const ss=getSS(); setupOrders();
+  addColIfMissing_(ss.getSheetByName(SHEETS.ORDERS),'Targets JSON');
+  addColIfMissing_(ss.getSheetByName(SHEETS.ORDERS),'Units JSON');
+  addColIfMissing_(ss.getSheetByName(SHEETS.ORDERS),'Bill To');
+  addColIfMissing_(ss.getSheetByName(SHEETS.ORDERS),'Ship To');
+  addColIfMissing_(ss.getSheetByName(SHEETS.PACKING),'Dispatch No');
+  addColIfMissing_(ss.getSheetByName(SHEETS.PACKING),'Pcs');
+  if(!ss.getSheetByName(DISPATCHES_SHEET)){
+    const d=ss.insertSheet(DISPATCHES_SHEET);
+    const h=['Dispatch ID','Order ID','Date','Slip No','Contractor','Tempu','Bags','Weight (kg)','Per-Quality JSON','Packing List URL','By','Timestamp'];
+    d.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); d.setFrozenRows(1);
+  }
+  const _dsh=ss.getSheetByName(DISPATCHES_SHEET); if(_dsh){ addColIfMissing_(_dsh,'Bill To'); addColIfMissing_(_dsh,'Ship To'); addColIfMissing_(_dsh,'Dispatch From'); addColIfMissing_(_dsh,'Pcs'); addColIfMissing_(_dsh,'With Bag'); }
+}
+function colMap_(sheetName){ const sh=getSS().getSheetByName(sheetName); const head=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();}); const m={}; head.forEach(function(h,i){m[h]=i;}); return m; }
+function ordCol_(){ return colMap_(SHEETS.ORDERS); }
+function packCol_(){ return colMap_(SHEETS.PACKING); }
+function dispCol_(){ return colMap_(DISPATCHES_SHEET); }
+function findOrderRow_(id){ const sh=getSS().getSheetByName(SHEETS.ORDERS); const d=sh.getDataRange().getValues(); for(let i=1;i<d.length;i++){ if(d[i][0]===id) return {sh:sh,row:i+1,data:d[i]}; } return null; }
+
+function parseTargets_(s){ try{ return JSON.parse(s||'{}')||{}; }catch(e){ return {}; } }
+function dispatchedForOrder_(orderId){
+  const ss=getSS(); const sh=ss.getSheetByName(DISPATCHES_SHEET); const out={count:{},weight:{},history:[]};
+  if(!sh) return out;
+  const d=sh.getDataRange().getValues(); const m=dispCol_();
+  for(let i=1;i<d.length;i++){
+    if(d[i][m['order id']]!==orderId) continue;
+    let pq={}; try{ pq=JSON.parse(d[i][m['per-quality json']]||'{}'); }catch(err){ pq={}; }
+    Object.keys(pq).forEach(function(q){ out.count[q]=(out.count[q]||0)+(Number(pq[q].count)||0); out.weight[q]=(out.weight[q]||0)+(Number(pq[q].weight)||0); });
+    out.history.push({ dispatchId:d[i][m['dispatch id']], date:dateKey(d[i][m['date']]), slipNo:d[i][m['slip no']], contractor:d[i][m['contractor']], tempu:d[i][m['tempu']], bags:Number(d[i][m['bags']])||0, weight:round(Number(d[i][m['weight (kg)']])||0), url:d[i][m['packing list url']] });
+  }
+  return out;
+}
+function orderSummary_(orow,m){
+  const orderId=orow[m['order id']];
+  const targets=parseTargets_(orow[m['targets json']]);
+  const units=(m['units json']!==undefined)?parseTargets_(orow[m['units json']]):{};
+  const disp=dispatchedForOrder_(orderId);
+  const perQuality=[]; let allMet=true, anyOver=false, totalOrdered=0, totalDispatched=0;
+  Object.keys(targets).forEach(function(q){
+    const ordered=Number(targets[q])||0;
+    const dispatched=Math.round(disp.count[q]||0);
+    const pending=Math.max(0,ordered-dispatched);
+    const over=Math.max(0,dispatched-ordered);
+    if(dispatched<ordered) allMet=false;
+    if(dispatched>ordered) anyOver=true;
+    perQuality.push({quality:q,ordered:ordered,dispatched:dispatched,pending:pending,over:over,unit:(units[q]||'Bora')});
+    totalOrdered+=ordered; totalDispatched+=dispatched;
+  });
+  return {targets:targets,perQuality:perQuality,history:disp.history,allMet:(Object.keys(targets).length>0&&allMet),over:anyOver,totalOrdered:totalOrdered,totalDispatched:totalDispatched,totalPending:Math.max(0,totalOrdered-totalDispatched)};
+}
+
+function punchOrder(e){
+  const u=requireCan_(e.user,'order_entry'); ensureOrders_();
+  const sh=getSS().getSheetByName(SHEETS.ORDERS); const m=ordCol_();
+  if(!String(e.customer||'').trim()) return {ok:false,msg:'Enter customer name'};
+  const targets={}; const units={}; let has=false;
+  (e.lines||[]).forEach(function(l){ const it=String(l.item||'').trim(); const b=Math.round(Number(l.bora)||0); if(it&&b>0){ targets[it]=(targets[it]||0)+b; units[it]=String(l.unit||'Bora').trim()||'Bora'; has=true; } });
+  if(!has) return {ok:false,msg:'Add at least one quality with a target'};
+  const details=Object.keys(targets).map(function(q){ return q+': '+targets[q]+' '+(units[q]||'Bora'); }).join(', ');
+  const id='ORD-'+pad4(Math.max(0,sh.getLastRow()-1)+1);
+  const arr=new Array(sh.getLastColumn()).fill('');
+  arr[m['order id']]=id;
+  if(m['date']!==undefined) arr[m['date']]=e.date||dateKey(new Date());
+  if(m['customer']!==undefined) arr[m['customer']]=String(e.customer).trim();
+  if(m['order details']!==undefined) arr[m['order details']]=details;
+  if(m['targets json']!==undefined) arr[m['targets json']]=JSON.stringify(targets);
+  if(m['units json']!==undefined) arr[m['units json']]=JSON.stringify(units);
+  if(m['bill to']!==undefined) arr[m['bill to']]=String(e.billTo||'').trim();
+  if(m['ship to']!==undefined) arr[m['ship to']]=String(e.shipTo||'').trim();
+  if(m['status']!==undefined) arr[m['status']]='Pending';
+  if(m['punched by']!==undefined) arr[m['punched by']]=u.name;
+  if(m['notes']!==undefined) arr[m['notes']]=e.notes||'';
+  sh.appendRow(arr);
+  logAudit_(u,'Order Punched',id+' · '+e.customer+' · '+details);
+  return {ok:true,id:id};
+}
+function getOrders(user){
+  const u=requireUser_(user);
+  if(!(u.can.order_entry||u.can.dispatch||u.can.packing)) throw new Error('No order access.');
+  ensureOrders_();
+  const od=getSS().getSheetByName(SHEETS.ORDERS).getDataRange().getValues(); const m=ordCol_();
+  const pk=getSS().getSheetByName(SHEETS.PACKING).getDataRange().getValues(); const pm=packCol_();
+  const curCnt={},curWt={};
+  for(let i=1;i<pk.length;i++){ const oid=pk[i][pm['order id']]; if(!oid) continue; if(String(pk[i][pm['dispatch no']]||'').trim()) continue; curCnt[oid]=(curCnt[oid]||0)+1; curWt[oid]=(curWt[oid]||0)+(Number(pk[i][pm['weight (kg)']])||0); }
+  const rows=[];
+  for(let i=1;i<od.length;i++){
+    const orow=od[i]; const id=orow[m['order id']]; if(!id) continue;
+    const status=String(orow[m['status']]||'').trim(); if(status==='Archived') continue;
+    const s=orderSummary_(orow,m);
+    rows.push({id:id,date:dateKey(orow[m['date']]),customer:orow[m['customer']],details:orow[m['order details']],status:status,perQuality:s.perQuality,history:s.history,over:s.over,totalOrdered:s.totalOrdered,totalDispatched:s.totalDispatched,totalPending:s.totalPending,currentBags:curCnt[id]||0,currentWeight:round(curWt[id]||0),billTo:(m['bill to']!==undefined?String(orow[m['bill to']]||'').trim():''),shipTo:(m['ship to']!==undefined?String(orow[m['ship to']]||'').trim():'')});
+  }
+  rows.reverse(); return {rows:rows,canEdit:!!u.can.order_entry};
+}
+function editOrder(user,orderId,e){
+  const u=requireCan_(user,'order_entry'); ensureOrders_();
+  const f=findOrderRow_(orderId); if(!f) return {ok:false,msg:'Order not found'};
+  const m=ordCol_(); const sh=getSS().getSheetByName(SHEETS.ORDERS);
+  const targets={}; const units={}; let has=false;
+  (e.lines||[]).forEach(function(l){ const it=String(l.item||'').trim(); const b=Math.round(Number(l.bora)||0); if(it&&b>0){ targets[it]=(targets[it]||0)+b; units[it]=String(l.unit||'Bora').trim()||'Bora'; has=true; } });
+  if(!has) return {ok:false,msg:'Add at least one quality with a target'};
+  const details=Object.keys(targets).map(function(q){ return q+': '+targets[q]+' '+(units[q]||'Bora'); }).join(', ');
+  const row=f.row;
+  if(m['customer']!==undefined && e.customer!==undefined) sh.getRange(row,m['customer']+1).setValue(String(e.customer).trim());
+  if(m['date']!==undefined && e.date) sh.getRange(row,m['date']+1).setValue(e.date);
+  if(m['order details']!==undefined) sh.getRange(row,m['order details']+1).setValue(details);
+  if(m['targets json']!==undefined) sh.getRange(row,m['targets json']+1).setValue(JSON.stringify(targets));
+  if(m['units json']!==undefined) sh.getRange(row,m['units json']+1).setValue(JSON.stringify(units));
+  if(m['bill to']!==undefined && e.billTo!==undefined) sh.getRange(row,m['bill to']+1).setValue(String(e.billTo||'').trim());
+  if(m['ship to']!==undefined && e.shipTo!==undefined) sh.getRange(row,m['ship to']+1).setValue(String(e.shipTo||'').trim());
+  logAudit_(u,'Order Edited',orderId+' · '+details);
+  return {ok:true};
+}
+function getPendingOrders(user){
+  const u=requireUser_(user);
+  if(!(u.can.order_entry||u.can.dispatch||u.can.packing)) throw new Error('No order access.');
+  ensureOrders_();
+  const od=getSS().getSheetByName(SHEETS.ORDERS).getDataRange().getValues(); const m=ordCol_();
+  const party={}, item={}; const orders=[];
+  for(let i=1;i<od.length;i++){
+    const orow=od[i]; const id=orow[m['order id']]; if(!id) continue;
+    const status=String(orow[m['status']]||'').trim(); if(status==='Archived'||status==='Completed') continue;
+    const s=orderSummary_(orow,m);
+    if(s.totalPending<=0) continue;
+    const cust=String(orow[m['customer']]||'').trim()||'—';
+    party[cust]=(party[cust]||0)+s.totalPending;
+    const its=[];
+    s.perQuality.forEach(function(q){ if(q.pending>0){ item[q.quality]=(item[q.quality]||0)+q.pending; its.push({quality:q.quality,pending:q.pending,unit:q.unit||'Bora'}); } });
+    orders.push({id:id,customer:cust,date:dateKey(orow[m['date']]),status:status,totalPending:s.totalPending,items:its});
+  }
+  const partyArr=Object.keys(party).sort().map(function(p){return {customer:p,pending:party[p]};});
+  const itemArr=Object.keys(item).sort().map(function(it){return {quality:it,pending:item[it]};});
+  orders.sort(function(a,b){return b.totalPending-a.totalPending;});
+  return {party:partyArr,item:itemArr,orders:orders};
+}
+function acceptOrder(user,id){
+  const u=requireCan_(user,'packing'); ensureOrders_();
+  const f=findOrderRow_(id); if(!f) return {ok:false,msg:'Not found'};
+  const m=ordCol_(); const status=String(f.data[m['status']]||'').trim();
+  if(status!=='Pending') return {ok:false,msg:'Already '+status};
+  f.sh.getRange(f.row,m['status']+1).setValue('Accepted');
+  if(m['accepted by']!==undefined) f.sh.getRange(f.row,m['accepted by']+1).setValue(u.name);
+  logAudit_(u,'Order Accepted',id);
+  return {ok:true,status:'Accepted'};
+}
+function addBora(e){
+  const u=requireCan_(e.user,'packing'); ensureOrders_();
+  const lock=LockService.getScriptLock();
+  try{ lock.waitLock(15000); }catch(err){ return {ok:false,msg:'Server busy, tap again'}; }
+  try{
+    const f=findOrderRow_(e.orderId); if(!f) return {ok:false,msg:'Order not found'};
+    const m=ordCol_(); const status=String(f.data[m['status']]||'').trim();
+    if(status!=='Accepted'&&status!=='Packing') return {ok:false,msg:'Order not ready ('+status+')'};
+    const quality=String(e.quality||'').trim(); const weight=round(e.weight);
+    if(!quality) return {ok:false,msg:'Select quality'};
+    if(!(weight>0)) return {ok:false,msg:'Enter weight'};
+    const _tg=parseTargets_(f.data[m['targets json']]);
+    if(Object.keys(_tg).length && _tg[quality]===undefined) return {ok:false,msg:quality+' is not in this order'};
+    const pk=getSS().getSheetByName(SHEETS.PACKING); const pm=packCol_(); const data=pk.getDataRange().getValues();
+    let qCount=0,totCount=0,totWt=0,dup=null,dispQ=0;
+    for(let i=1;i<data.length;i++){
+      if(data[i][pm['order id']]!==e.orderId) continue;
+      if(String(data[i][pm['dispatch no']]||'').trim()){ if(String(data[i][pm['quality']]).trim()===quality) dispQ++; continue; }
+      totCount++; totWt+=Number(data[i][pm['weight (kg)']])||0;
+      if(String(data[i][pm['quality']]).trim()===quality) qCount++;
+      if(e.token&&String(data[i][pm['token']])===String(e.token)) dup={no:data[i][pm['bag no']],q:data[i][pm['quality']]};
+    }
+    if(dup) return {ok:true,boraNo:dup.no,quality:dup.q,dup:true};
+    const tgtQ=_tg[quality];
+    if(tgtQ!==undefined && (dispQ+qCount+1)>Number(tgtQ)) return {ok:false,msg:quality+': only '+tgtQ+' ordered — '+(dispQ+qCount)+' already done. Cannot add more.'};
+    const boraNo=qCount+1;
+    const arr=new Array(pk.getLastColumn()).fill('');
+    arr[pm['order id']]=e.orderId; arr[pm['bag no']]=boraNo; arr[pm['quality']]=quality; arr[pm['weight (kg)']]=weight; arr[pm['packed by']]=u.name; arr[pm['timestamp']]=new Date(); arr[pm['token']]=e.token||''; arr[pm['dispatch no']]=''; if(pm['pcs']!==undefined) arr[pm['pcs']]=Math.round(Number(e.pcs)||0);
+    pk.appendRow(arr);
+    if(status==='Accepted') f.sh.getRange(f.row,m['status']+1).setValue('Packing');
+    logAudit_(u,'Bag Packed',e.orderId+' '+quality+' #'+boraNo+' '+weight+'kg');
+    return {ok:true,boraNo:boraNo,quality:quality};
+  } finally { lock.releaseLock(); }
+}
+function getOrderPacking(user,orderId){
+  const u=requireUser_(user);
+  if(!(u.can.packing||u.can.dispatch||u.can.order_entry)) throw new Error('No access.');
+  ensureOrders_();
+  const f=findOrderRow_(orderId); if(!f) throw new Error('Order not found');
+  const m=ordCol_();
+  const pk=getSS().getSheetByName(SHEETS.PACKING).getDataRange().getValues(); const pm=packCol_();
+  const raw=[];
+  for(let i=1;i<pk.length;i++){ if(pk[i][pm['order id']]!==orderId) continue; if(String(pk[i][pm['dispatch no']]||'').trim()) continue; raw.push({quality:String(pk[i][pm['quality']]).trim(),weight:round(Number(pk[i][pm['weight (kg)']])||0),pcs:(pm['pcs']!==undefined?Math.round(Number(pk[i][pm['pcs']])||0):0),token:String(pk[i][pm['token']]||'')}); }
+  const qSeq={},perQ={}; let total=0;
+  raw.forEach(function(b){ qSeq[b.quality]=(qSeq[b.quality]||0)+1; b.no=qSeq[b.quality]; perQ[b.quality]=perQ[b.quality]||{count:0,weight:0,pcs:0}; perQ[b.quality].count++; perQ[b.quality].weight+=b.weight; perQ[b.quality].pcs+=(b.pcs||0); total+=b.weight; });
+  const lastBora=raw.length?raw[raw.length-1]:null;
+  const boras=raw.slice().reverse().map(function(b){ return {no:b.no,quality:b.quality,weight:b.weight,pcs:b.pcs||0,token:b.token}; });
+  const perQuality=Object.keys(perQ).map(function(q){return {quality:q,count:perQ[q].count,weight:round(perQ[q].weight),pcs:perQ[q].pcs||0};});
+  const s=orderSummary_(f.data,m);
+  return {id:orderId,customer:f.data[m['customer']],details:f.data[m['order details']],status:String(f.data[m['status']]||'').trim(),
+    boras:boras,count:raw.length,total:round(total),perQuality:perQuality,lastNo:lastBora?lastBora.no:0,lastQuality:lastBora?lastBora.quality:'',
+    contractor:String(f.data[m['contractor']]||'').trim(),tempu:String(f.data[m['tempu']]||'').trim(),
+    billTo:(m['bill to']!==undefined?String(f.data[m['bill to']]||'').trim():''),shipTo:(m['ship to']!==undefined?String(f.data[m['ship to']]||'').trim():''),
+    targetSummary:s.perQuality,history:s.history,allMet:s.allMet,over:s.over,totalPending:s.totalPending};
+}
+function deleteBora(user,orderId,token){
+  const u=requireCan_(user,'packing'); ensureOrders_();
+  const lock=LockService.getScriptLock(); try{ lock.waitLock(15000); }catch(err){ return {ok:false,msg:'Busy, try again'}; }
+  try{
+    const pk=getSS().getSheetByName(SHEETS.PACKING); const pm=packCol_(); const data=pk.getDataRange().getValues();
+    for(let i=1;i<data.length;i++){ if(data[i][pm['order id']]===orderId && String(data[i][pm['token']])===String(token) && !String(data[i][pm['dispatch no']]||'').trim()){ const q=data[i][pm['quality']]; pk.deleteRow(i+1); logAudit_(u,'Bag Deleted',orderId+' '+q); return {ok:true}; } }
+    return {ok:false,msg:'Not found'};
+  } finally { lock.releaseLock(); }
+}
+function completeOrder(user,orderId,slipNo,contractor,tempu,dispatchFrom,withBag){
+  const u=requireCan_(user,'packing'); ensureOrders_();
+  const lock=LockService.getScriptLock(); try{ lock.waitLock(20000);}catch(err){ return {ok:false,msg:'Server busy, try again'}; }
+  try{
+    const f=findOrderRow_(orderId); if(!f) return {ok:false,msg:'Not found'};
+    const m=ordCol_(); const status=String(f.data[m['status']]||'').trim();
+    if(status==='Completed'||status==='Archived') return {ok:false,msg:'Order already completed'};
+    if(!String(slipNo||'').trim()) return {ok:false,msg:'Enter packing slip number'};
+    if(!String(contractor||'').trim()) return {ok:false,msg:'Select contractor'};
+    const billTo=(m['bill to']!==undefined)?String(f.data[m['bill to']]||'').trim():'';
+    const shipTo=(m['ship to']!==undefined)?String(f.data[m['ship to']]||'').trim():'';
+    dispatchFrom=String(dispatchFrom||'Factory').trim()||'Factory';
+    const withBagYes=(withBag===true||String(withBag)==='true'||String(withBag).toLowerCase()==='yes');
+    const pk=getSS().getSheetByName(SHEETS.PACKING); const pm=packCol_(); const pdata=pk.getDataRange().getValues();
+    const batch=[];
+    for(let i=1;i<pdata.length;i++){ if(pdata[i][pm['order id']]!==orderId) continue; if(String(pdata[i][pm['dispatch no']]||'').trim()) continue; batch.push({row:i+1,quality:String(pdata[i][pm['quality']]).trim(),weight:round(Number(pdata[i][pm['weight (kg)']])||0),pcs:(pm['pcs']!==undefined?Math.round(Number(pdata[i][pm['pcs']])||0):0)}); }
+    if(!batch.length) return {ok:false,msg:'No bags packed for this dispatch yet'};
+    const _tgD=parseTargets_(f.data[m['targets json']]);
+    if(Object.keys(_tgD).length){
+      const _dispC=dispatchedForOrder_(orderId).count; const _thisB={};
+      batch.forEach(function(b){ _thisB[b.quality]=(_thisB[b.quality]||0)+1; });
+      for(var _q in _thisB){ var _ord=Number(_tgD[_q]); if(!isNaN(_ord)){ var _already=Math.round(_dispC[_q]||0); if(_already+_thisB[_q]>_ord) return {ok:false,msg:_q+': sirf '+_ord+' order me the, '+_already+' already dispatch — '+_thisB[_q]+' aur nahi ja sakte. Extra bag delete karo.'}; } }
+    }
+    const disp=dispatchedForOrder_(orderId);
+    const dispatchId=orderId+'-D'+(disp.history.length+1);
+    const perQ={}; let total=0,count=0; const qSeq={}; const boras=[];
+    batch.forEach(function(b){ perQ[b.quality]=perQ[b.quality]||{count:0,weight:0,pcs:0}; perQ[b.quality].count++; perQ[b.quality].weight=round(perQ[b.quality].weight+b.weight); perQ[b.quality].pcs+=(b.pcs||0); total=round(total+b.weight); count++; qSeq[b.quality]=(qSeq[b.quality]||0)+1; boras.push({no:qSeq[b.quality],quality:b.quality,weight:b.weight,pcs:b.pcs||0}); });
+    const data={id:orderId,customer:f.data[m['customer']],details:f.data[m['order details']],boras:boras.slice().reverse(),count:count,total:round(total),perQuality:Object.keys(perQ).map(function(q){return {quality:q,count:perQ[q].count,weight:round(perQ[q].weight),pcs:perQ[q].pcs||0};})};
+    const orowArr=[orderId,f.data[m['date']],f.data[m['customer']],f.data[m['order details']]];
+    const _units=(m['units json']!==undefined)?parseTargets_(f.data[m['units json']]):{};
+    const url=makePackingList_(orowArr,data,String(slipNo).trim(),String(contractor).trim(),String(tempu||'').trim(),dispatchId,billTo,shipTo,dispatchFrom,_units);
+    writePackingListBlock_(orowArr,data,String(slipNo).trim(),String(contractor).trim(),String(tempu||'').trim(),dispatchId,billTo,shipTo,dispatchFrom);
+    const led=getSS().getSheetByName(SHEETS.LEDGER); const date=dateKey(new Date());
+    data.perQuality.forEach(function(q){
+      led.appendRow([new Date(),date,DISPATCH_DEPT,q.quality,0,0,0,q.weight,0,0,round(-q.weight),u.name,'Order '+orderId+' / '+f.data[m['customer']]+' / '+dispatchId+' / Slip '+slipNo+' / '+contractor]);
+      cledgerAdd_(contractor,q.quality,'OUT',q.count,'Packing List '+slipNo,dispatchId,u.name);
+    });
+    var _dnCol=pm['dispatch no']+1; var _colVals=pk.getRange(1,_dnCol,pdata.length,1).getValues();
+    batch.forEach(function(b){ _colVals[b.row-1][0]=dispatchId; });
+    pk.getRange(1,_dnCol,pdata.length,1).setValues(_colVals);
+    const dsh=getSS().getSheetByName(DISPATCHES_SHEET); const dm=dispCol_(); const darr=new Array(dsh.getLastColumn()).fill('');
+    darr[dm['dispatch id']]=dispatchId; darr[dm['order id']]=orderId; darr[dm['date']]=date; darr[dm['slip no']]=String(slipNo).trim();
+    darr[dm['contractor']]=String(contractor).trim(); darr[dm['tempu']]=String(tempu||'').trim(); darr[dm['bags']]=count; darr[dm['weight (kg)']]=round(total);
+    const _unitsJ=(m['units json']!==undefined)?parseTargets_(f.data[m['units json']]):{};
+    darr[dm['per-quality json']]=JSON.stringify((function(){var o={};data.perQuality.forEach(function(q){o[q.quality]={count:q.count,weight:q.weight,pcs:(q.pcs||0),unit:(_unitsJ[q.quality]||'Bora')};});return o;})());
+    darr[dm['packing list url']]=url; darr[dm['by']]=u.name; darr[dm['timestamp']]=new Date();
+    if(dm['bill to']!==undefined) darr[dm['bill to']]=billTo;
+    if(dm['ship to']!==undefined) darr[dm['ship to']]=shipTo;
+    if(dm['dispatch from']!==undefined) darr[dm['dispatch from']]=dispatchFrom;
+    var _totPcs=0; data.perQuality.forEach(function(q){_totPcs+=(q.pcs||0);});
+    if(dm['pcs']!==undefined) darr[dm['pcs']]=_totPcs;
+    if(dm['with bag']!==undefined) darr[dm['with bag']]=withBagYes?'Yes':'No';
+    dsh.appendRow(darr);
+    outwardAddPacking_(dispatchId, f.data[m['customer']], count, total, url, u.name);
+    if(m['contractor']!==undefined) f.sh.getRange(f.row,m['contractor']+1).setValue(String(contractor).trim());
+    if(m['tempu']!==undefined) f.sh.getRange(f.row,m['tempu']+1).setValue(String(tempu||'').trim());
+    const fresh=findOrderRow_(orderId); const s=orderSummary_(fresh.data,m);
+    let closed=false;
+    if(s.allMet){ f.sh.getRange(f.row,m['status']+1).setValue('Completed'); closed=true; } else { f.sh.getRange(f.row,m['status']+1).setValue('Packing'); }
+    logAudit_(u,'Dispatch '+dispatchId,'Slip '+slipNo+' · '+contractor+' · '+count+' bags · '+round(total)+' kg'+(closed?' · ORDER COMPLETE':''));
+    return {ok:true,url:url,total:round(total),count:count,dispatchId:dispatchId,closed:closed,pending:s.perQuality};
+  } finally { lock.releaseLock(); }
+}
+function archiveOrder(user,id){
+  const u=requireCan_(user,'order_entry'); ensureOrders_();
+  const f=findOrderRow_(id); if(!f) return {ok:false,msg:'Not found'};
+  const m=ordCol_(); const status=String(f.data[m['status']]||'').trim();
+  if(status!=='Completed') return {ok:false,msg:'Only completed orders can be marked done'};
+  f.sh.getRange(f.row,m['status']+1).setValue('Archived');
+  logAudit_(u,'Order Marked Done (Archived)',id);
+  return {ok:true};
+}
+function writePackingListBlock_(orow,data,slipNo,contractor,tempu,dispatchId,billTo,shipTo,dispatchFrom){
+  billTo=String(billTo||orow[2]||'').trim(); shipTo=String(shipTo||orow[2]||'').trim(); dispatchFrom=String(dispatchFrom||'Factory').trim()||'Factory';
+  const ss=getSS(); let sh=ss.getSheetByName(SHEETS.PLISTS);
+  if(!sh){ sh=ss.insertSheet(SHEETS.PLISTS); sh.getRange(1,1,1,4).setValues([['PACKING LISTS — each completed list saved in full (do not edit)','','','']]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); sh.setFrozenRows(1); }
+  const now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'dd-MMM-yyyy HH:mm');
+  const chron=data.boras.slice().reverse(); const groups={},order=[];
+  chron.forEach(function(b){ if(!groups[b.quality]){groups[b.quality]=[];order.push(b.quality);} groups[b.quality].push(b); });
+  const block=[];
+  block.push(['PACKING SLIP No',slipNo,'','']);
+  block.push(['Dispatch No',dispatchId||'-','','']);
+  block.push(['Order No',orow[0],'','']);
+  block.push(['Customer',orow[2],'','']);
+  block.push(['Bill To',billTo,'','']);
+  block.push(['Ship To',shipTo,'','']);
+  block.push(['Dispatch From',dispatchFrom,'','']);
+  block.push(['Contractor',contractor,'','']);
+  block.push(['Tempu',tempu||'-','','']);
+  block.push(['Order Details',orow[3]||'-','','']);
+  block.push(['Date & Time',now,'','']);
+  block.push(['Bag/Bale No','Quality','Pcs','Weight (kg)']);
+  const headerRowOffset=block.length;
+  let grandPcs=0;
+  order.forEach(function(q){ const list=groups[q]; let sub=0,subP=0; block.push([q,'','','']); list.forEach(function(b,idx){ sub+=b.weight; subP+=(b.pcs||0); block.push([idx+1,q,(b.pcs||0),b.weight]); }); grandPcs+=subP; block.push([q+' Total',list.length+' Bag/Bale',subP+' pcs',round(sub)+' kg']); });
+  block.push(['GRAND TOTAL',data.count+' Bag/Bale',grandPcs+' pcs',data.total+' kg']);
+  block.push(['','','','']); block.push(['','','','']);
+  const start=sh.getLastRow()+1;
+  sh.getRange(start,1,block.length,4).setValues(block);
+  sh.getRange(start,1,1,2).setFontWeight('bold');
+  sh.getRange(start+headerRowOffset-1,1,1,4).setFontWeight('bold').setBackground('#eef2f7');
+  sh.getRange(start+block.length-3,1,1,4).setFontWeight('bold');
+}
+function makePackingList_(orow,data,slipNo,contractor,tempu,dispatchId,billTo,shipTo,dispatchFrom,units){
+  units=units||{};
+  billTo=String(billTo||orow[2]||'').trim(); shipTo=String(shipTo||orow[2]||'').trim(); dispatchFrom=String(dispatchFrom||'Factory').trim()||'Factory';
+  const now=Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'dd-MMM-yyyy HH:mm');
+  const chron=data.boras.slice().reverse(); const groups={},order=[];
+  chron.forEach(function(b){ if(!groups[b.quality]){ groups[b.quality]=[]; order.push(b.quality); } groups[b.quality].push(b); });
+  let bodyRows='', grandPcs=0, allUnits={};
+  order.forEach(function(q){ const list=groups[q]; let sub=0, subP=0; const uq=String(units[q]||'Bora').trim()||'Bora'; allUnits[uq]=true;
+    bodyRows+='<tr><td colspan="5" style="padding:7px 8px;border:1px solid #ddd;background:#eef2f7;font-weight:bold;">'+q+'</td></tr>';
+    list.forEach(function(b,idx){ sub+=b.weight; subP+=(b.pcs||0); bodyRows+='<tr><td style="padding:4px 8px;border:1px solid #ddd;text-align:center;">'+(idx+1)+'</td><td style="padding:4px 8px;border:1px solid #ddd;">'+q+'</td><td style="padding:4px 8px;border:1px solid #ddd;text-align:center;">'+(b.pcs||0)+'</td><td style="padding:4px 8px;border:1px solid #ddd;text-align:right;">'+b.weight+'</td><td style="border:1px solid #ddd;"></td></tr>'; });
+    grandPcs+=subP; const avg=subP>0?round(sub/subP):0;
+    bodyRows+='<tr><td colspan="2" style="padding:6px 8px;border:1px solid #ddd;background:#f7faff;font-weight:bold;text-align:right;">'+q+' Total — '+list.length+' '+uq+'</td><td style="padding:6px 8px;border:1px solid #ddd;background:#f7faff;font-weight:bold;text-align:center;">'+subP+' pcs</td><td style="padding:6px 8px;border:1px solid #ddd;background:#f7faff;font-weight:bold;text-align:right;">'+round(sub)+' kg</td><td style="padding:6px 8px;border:1px solid #ddd;background:#f7faff;font-weight:bold;text-align:right;">'+avg+'</td></tr>';
+  });
+  const gUnit=Object.keys(allUnits).length===1?Object.keys(allUnits)[0]:'Bags';
+  const gAvg=grandPcs>0?round(data.total/grandPcs):0;
+  const odet=(orow[3]&&String(orow[3]).trim())?String(orow[3]):'';
+  const html='<div style="font-family:Arial;padding:24px;color:#111;font-size:12px;">'
++'<table style="width:100%;border-collapse:collapse;"><tr>'
++'<td style="vertical-align:bottom;"><div style="font-size:22px;font-weight:bold;color:#0f2942;letter-spacing:1px;">PACKING LIST</div></td>'
++'<td style="vertical-align:bottom;text-align:right;"><table style="font-size:11.5px;border-collapse:collapse;margin-left:auto;">'
++'<tr><td style="padding:2px 10px 2px 0;color:#777;text-align:right;">Slip No</td><td style="padding:2px 0;font-weight:bold;text-align:right;">'+slipNo+'</td></tr>'
++'<tr><td style="padding:2px 10px 2px 0;color:#777;text-align:right;">Dispatch No</td><td style="padding:2px 0;font-weight:bold;text-align:right;">'+(dispatchId||'-')+'</td></tr>'
++'<tr><td style="padding:2px 10px 2px 0;color:#777;text-align:right;">Order No</td><td style="padding:2px 0;font-weight:bold;text-align:right;">'+orow[0]+'</td></tr>'
++'<tr><td style="padding:2px 10px 2px 0;color:#777;text-align:right;">Date</td><td style="padding:2px 0;font-weight:bold;text-align:right;">'+now+'</td></tr>'
++'</table></td></tr></table>'
++'<div style="height:3px;background:#0f2942;margin:10px 0 14px;"></div>'
++'<table style="width:100%;border-collapse:collapse;font-size:12px;"><tr>'
++'<td style="width:50%;vertical-align:top;border:1px solid #ccc;padding:8px 10px;"><div style="font-size:10.5px;color:#888;font-weight:bold;letter-spacing:.5px;">BILL TO</div><div style="font-weight:bold;margin-top:3px;">'+billTo+'</div></td>'
++'<td style="width:50%;vertical-align:top;border:1px solid #ccc;border-left:none;padding:8px 10px;"><div style="font-size:10.5px;color:#888;font-weight:bold;letter-spacing:.5px;">SHIP TO</div><div style="font-weight:bold;margin-top:3px;">'+shipTo+'</div></td>'
++'</tr></table>'
++'<table style="width:100%;border-collapse:collapse;font-size:11.5px;margin-top:8px;"><tr>'
++'<td style="border:1px solid #ccc;padding:5px 9px;"><span style="color:#888;">Dispatch From: </span><b>'+dispatchFrom+'</b></td>'
++'<td style="border:1px solid #ccc;border-left:none;padding:5px 9px;"><span style="color:#888;">Tempu: </span><b>'+(tempu||'-')+'</b></td>'
++'</tr>'
++'</table>'
++'<table style="width:100%;font-size:11.5px;border-collapse:collapse;margin-top:14px;">'
++'<tr><th style="padding:6px 8px;border:1px solid #bbb;background:#0f2942;color:#fff;text-align:center;width:46px;">#</th><th style="padding:6px 8px;border:1px solid #bbb;background:#0f2942;color:#fff;text-align:left;">Quality</th><th style="padding:6px 8px;border:1px solid #bbb;background:#0f2942;color:#fff;text-align:center;">Pcs</th><th style="padding:6px 8px;border:1px solid #bbb;background:#0f2942;color:#fff;text-align:right;">Weight (kg)</th><th style="padding:6px 8px;border:1px solid #bbb;background:#0f2942;color:#fff;text-align:right;">Avg kg/pc</th></tr>'
++bodyRows
++'</table>'
++'<table style="width:100%;border-collapse:collapse;margin-top:12px;"><tr>'
++'<td style="width:58%;vertical-align:bottom;font-size:10.5px;color:#999;">Goods packed and checked at dispatch.</td>'
++'<td style="width:42%;"><table style="width:100%;font-size:12px;border-collapse:collapse;">'
++'<tr><td style="padding:5px 10px;border:1px solid #ccc;color:#555;">Total '+gUnit+'</td><td style="padding:5px 10px;border:1px solid #ccc;border-left:none;text-align:right;font-weight:bold;">'+data.count+'</td></tr>'
++'<tr><td style="padding:5px 10px;border:1px solid #ccc;border-top:none;color:#555;">Total Pcs</td><td style="padding:5px 10px;border:1px solid #ccc;border-top:none;border-left:none;text-align:right;font-weight:bold;">'+grandPcs+'</td></tr>'
++'<tr><td style="padding:5px 10px;border:1px solid #ccc;border-top:none;color:#555;">Avg kg/pc</td><td style="padding:5px 10px;border:1px solid #ccc;border-top:none;border-left:none;text-align:right;font-weight:bold;">'+gAvg+'</td></tr>'
++'<tr><td style="padding:7px 10px;border:2px solid #0f2942;color:#0f2942;font-weight:bold;">GRAND TOTAL</td><td style="padding:7px 10px;border:2px solid #0f2942;border-left:none;text-align:right;font-weight:bold;color:#0f2942;">'+data.total+' kg</td></tr>'
++'</table></td></tr></table>'
++'<table style="width:100%;margin-top:42px;font-size:12px;"><tr><td>______________________<br>Packing Dept</td><td style="text-align:right;">______________________<br>Authorised Sign</td></tr></table>'
++'</div>';
+  const pdf=Utilities.newBlob(html,'text/html','pl.html').getAs('application/pdf'); pdf.setName('PackingList_'+slipNo+'_'+orow[0]+(dispatchId?('_'+dispatchId):'')+'.pdf');
+  const file=getFolder_('Romero Packing Lists').createFile(pdf); file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW);
+  return file.getUrl();
+}
+
+/* ---------- STANDALONE QC ---------- */
+function readCol_(sh,colIdx){ const d=sh.getDataRange().getValues(); const out=[]; for(let i=1;i<d.length;i++){ const v=String(d[i][colIdx]||'').trim(); if(v) out.push(v); } return out; }
+function findSession_(qcId){ const sh=getSS().getSheetByName(SHEETS.QCSESS); const d=sh.getDataRange().getValues(); for(let i=1;i<d.length;i++){ if(d[i][0]===qcId) return {sh:sh,row:i+1,data:d[i]}; } return null; }
+function getQCConfig(user){
+  requireCan_(user,'qc'); setupQC();
+  const ss=getSS();
+  const contractors=readCol_(ss.getSheetByName(SHEETS.QCCONTR),0);
+  let columns=readCol_(ss.getSheetByName(SHEETS.QCCOLS),0);
+  if(!columns.length) columns=QC_DEFAULT_COLUMNS.slice();
+  return {contractors:contractors,columns:columns,items:ITEMS};
+}
+function startInspection(user,quality,contractor){
+  const u=requireCan_(user,'qc'); setupQC();
+  if(!String(quality||'').trim()) return {ok:false,msg:'Select quality'};
+  if(!String(contractor||'').trim()) return {ok:false,msg:'Select contractor'};
+  const sh=getSS().getSheetByName(SHEETS.QCSESS);
+  const id='QC-'+pad4(Math.max(0,sh.getLastRow()-1)+1);
+  sh.appendRow([id,'-','-',quality,contractor,u.name,'In Progress',new Date(),'',0,0]);
+  logAudit_(u,'QC Started',id+' · '+quality+' · '+contractor);
+  return {ok:true,qcId:id};
+}
+function savePiece(e){
+  const u=requireCan_(e.user,'qc');
+  const lock=LockService.getScriptLock(); try{ lock.waitLock(15000); }catch(err){ return {ok:false,msg:'Busy, tap again'}; }
+  try{
+    const sess=findSession_(e.qcId); if(!sess) return {ok:false,msg:'Inspection not found'};
+    if(sess.data[6]!=='In Progress') return {ok:false,msg:'Inspection already completed'};
+    const weight=round(e.weight); if(!(weight>0)) return {ok:false,msg:'Enter weight'};
+    const psh=getSS().getSheetByName(SHEETS.QCPIECE); const pd=psh.getDataRange().getValues();
+    let count=0,dupNo=null;
+    for(let i=1;i<pd.length;i++){ if(pd[i][0]===e.qcId){ count++; if(e.token&&String(pd[i][10])===String(e.token)) dupNo=pd[i][1]; } }
+    if(dupNo){ return {ok:true,srNo:dupNo,dup:true}; }
+    const srNo=count+1;
+    let photoUrl=''; if(e.photoData){ photoUrl=savePhotoTo_(e.photoData,e.qcId+'_'+srNo+'.jpg','Romero QC Photos'); }
+    const checksJson=JSON.stringify(e.checks||{});
+    psh.appendRow([e.qcId,srNo,String(e.colour||'').trim(),String(e.size||'').trim(),weight,String(e.remark||'').trim(),checksJson,photoUrl,u.name,new Date(),e.token||'']);
+    logAudit_(u,'QC Piece',e.qcId+' #'+srNo+' '+weight+'kg');
+    return {ok:true,srNo:srNo};
+  } finally { lock.releaseLock(); }
+}
+function getInspection(user,qcId){
+  requireCan_(user,'qc');
+  const sess=findSession_(qcId); if(!sess) throw new Error('Inspection not found');
+  const psh=getSS().getSheetByName(SHEETS.QCPIECE).getDataRange().getValues();
+  const pieces=[]; let total=0;
+  for(let i=1;i<psh.length;i++){ if(psh[i][0]!==qcId) continue; const w=round(psh[i][4]); total+=w; let checks={}; try{ checks=JSON.parse(psh[i][6]||'{}'); }catch(err){ checks={}; } pieces.push({no:psh[i][1],colour:psh[i][2],size:psh[i][3],weight:w,remark:psh[i][5],checks:checks,photo:psh[i][7],token:String(psh[i][10]||'')}); }
+  const list=pieces.slice().reverse();
+  return {qcId:qcId,quality:sess.data[3],contractor:sess.data[4],inspector:sess.data[5],status:sess.data[6],pieces:list,count:pieces.length,total:round(total)};
+}
+function deletePiece(user,qcId,token){
+  const u=requireCan_(user,'qc');
+  const lock=LockService.getScriptLock(); try{ lock.waitLock(15000); }catch(err){ return {ok:false,msg:'Busy'}; }
+  try{
+    const psh=getSS().getSheetByName(SHEETS.QCPIECE); const pd=psh.getDataRange().getValues();
+    for(let i=1;i<pd.length;i++){ if(pd[i][0]===qcId && String(pd[i][10])===String(token)){ psh.deleteRow(i+1); logAudit_(u,'QC Piece Deleted',qcId); return {ok:true}; } }
+    return {ok:false,msg:'Not found'};
+  } finally { lock.releaseLock(); }
+}
+function completeInspection(user,qcId){
+  const u=requireCan_(user,'qc');
+  const sess=findSession_(qcId); if(!sess) return {ok:false,msg:'Not found'};
+  if(sess.data[6]==='Completed') return {ok:false,msg:'Already completed'};
+  const info=getInspection(user,qcId);
+  if(info.count===0) return {ok:false,msg:'No pieces inspected yet'};
+  sess.sh.getRange(sess.row,7).setValue('Completed'); sess.sh.getRange(sess.row,9).setValue(new Date()); sess.sh.getRange(sess.row,10).setValue(info.count); sess.sh.getRange(sess.row,11).setValue(info.total);
+  logAudit_(u,'QC Completed',qcId+' · '+info.count+' pcs · '+info.total+' total wt');
+  return {ok:true,count:info.count,total:info.total};
+}
+function getQCList(user){
+  requireCan_(user,'qc'); setupQC();
+  const d=getSS().getSheetByName(SHEETS.QCSESS).getDataRange().getValues();
+  const rows=[];
+  for(let i=1;i<d.length;i++){ if(!d[i][0]) continue; rows.push({qcId:d[i][0],quality:d[i][3],contractor:d[i][4],inspector:d[i][5],status:d[i][6],started:(d[i][7] instanceof Date)?Utilities.formatDate(d[i][7],Session.getScriptTimeZone(),'dd-MMM HH:mm'):'',pieces:d[i][9]||0,total:d[i][10]||0}); }
+  rows.reverse(); return rows;
+}
+
+/* ---------- EMAIL ---------- */
+const ALERT_EMAIL = 'youremail@example.com';
+function setupTriggers(){ ScriptApp.getProjectTriggers().forEach(function(t){ var fn=t.getHandlerFunction(); if(fn==='sendEntryReminder'||fn==='sendDailySummary') ScriptApp.deleteTrigger(t); }); ScriptApp.newTrigger('sendEntryReminder').timeBased().everyDays(1).atHour(19).create(); ScriptApp.newTrigger('sendDailySummary').timeBased().everyDays(1).atHour(9).create(); }
+function sendEntryReminder(){ const today=dateKey(new Date()); const data=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues(); const entered={}; for(let i=1;i<data.length;i++){ if(dateKey(data[i][1])===today&&data[i][2]) entered[data[i][2]]=1; } const pending=PRODUCTION_DEPARTMENTS.concat([DISPATCH_DEPT]).filter(function(d){return !entered[d];}); if(pending.length===0){ MailApp.sendEmail(ALERT_EMAIL,'✓ Production: all entered ('+today+')','All recorded.'); return; } let body='Today ('+today+') NOT entered:\n\n'; pending.forEach(function(d){body+='• '+d+'\n';}); MailApp.sendEmail(ALERT_EMAIL,'⏰ Entry pending: '+pending.length+' dept(s)',body); }
+function sendDailySummary(){ const y=new Date();y.setDate(y.getDate()-1);const yKey=dateKey(y); const data=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues(); const map={}; for(let i=1;i<data.length;i++){ if(dateKey(data[i][1])!==yKey) continue; const dept=data[i][2]; if(!dept) continue; map[dept]=map[dept]||{rR:0,fR:0,wst:0}; map[dept].rR+=Number(data[i][4])||0; map[dept].fR+=Number(data[i][6])||0; map[dept].wst+=Number(data[i][8])||0; } let body='PRODUCTION SUMMARY — '+yKey+'\n\n'; const order=PRODUCTION_DEPARTMENTS.concat([DISPATCH_DEPT]); let any=false; order.forEach(function(d){ if(map[d]){ any=true; body+='• '+d+': received '+round(map[d].rR)+' rolls, forwarded '+round(map[d].fR)+' rolls'+(map[d].wst>0?', wastage '+round(map[d].wst)+' kg':'')+'\n'; } }); if(!any) body+='No entries yesterday.\n'; body+='\n— Romero Production Tracker'; MailApp.sendEmail(ALERT_EMAIL,'📊 Production summary '+yKey,body); }
+/* ---------- DESIGNS + PROGRAM + LOTS ---------- */
+const DESIGNS_SHEET = 'DESIGNS';
+const LOTS_SHEET = 'LOTS';
+const LOTMOVES_SHEET = 'LOT MOVES';
+const DEFAULT_MATCHINGS = 2;
+const DEFAULT_ROLLS_PER_MATCHING = 15;
+const LOT_FLOW = ['Pre-finishing','Printing','Post-finishing'];
+
+function setupDesigns(){
+  const ss=getSS();
+  let sh=ss.getSheetByName(DESIGNS_SHEET);
+  if(!sh){
+    sh=ss.insertSheet(DESIGNS_SHEET);
+    const h=['Quality','Design','Matchings','Rolls Per Matching','Photo URL'];
+    sh.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff');
+    sh.setFrozenRows(1);
+    const rows=[];
+    ITEMS.forEach(function(it){ for(let d=1; d<=4; d++){ rows.push([it,'Design '+d,DEFAULT_MATCHINGS,DEFAULT_ROLLS_PER_MATCHING,'']); } });
+    sh.getRange(2,1,rows.length,5).setValues(rows);
+    sh.autoResizeColumns(1,5);
+  } else { addColIfMissing_(sh,'Photo URL'); }
+}
+function driveImg_(url){
+  url=String(url||'').trim(); if(!url) return '';
+  if(/\.(jpg|jpeg|png|gif|webp)(\?|$)/i.test(url)) return url;
+  var id=''; var m=url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/); if(m) id=m[1];
+  if(!id){ m=url.match(/[?&]id=([a-zA-Z0-9_-]+)/); if(m) id=m[1]; }
+  if(id) return 'https://drive.google.com/thumbnail?id='+id+'&sz=w600';
+  return url;
+}
+function getProgram(user, quality){
+  requireUser_(user); setupDesigns();
+  const q=String(quality||'').trim(); if(!q) return {ok:false,msg:'Select an item'};
+  const data=getSS().getSheetByName(DESIGNS_SHEET).getDataRange().getValues();
+  const head=data[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cPhoto=head.indexOf('photo url');
+  const lines=[]; let totalRolls=0, designCount=0;
+  for(let i=1;i<data.length;i++){
+    if(String(data[i][0]||'').trim()!==q) continue;
+    const design=String(data[i][1]||'').trim(); if(!design) continue;
+    const matchings=Number(data[i][2])||DEFAULT_MATCHINGS;
+    const rolls=Number(data[i][3])||DEFAULT_ROLLS_PER_MATCHING;
+    const photo=cPhoto>=0?driveImg_(data[i][cPhoto]):'';
+    designCount++;
+    for(let m=1;m<=matchings;m++){ lines.push({design:design,matching:'Matching '+m,rolls:rolls,photo:photo}); totalRolls+=rolls; }
+  }
+  return {ok:true,quality:q,lines:lines,designCount:designCount,totalRolls:round(totalRolls)};
+}
+function getReadyFromPrev(user, dept){
+  requireUser_(user); setupLots();
+  const order=PRODUCTION_DEPARTMENTS; const idx=order.indexOf(dept);
+  if(idx<=0) return {ok:true,prev:'',ready:[]};
+  const prev=order[idx-1];
+  const led=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+  const prevFwd={};
+  for(let i=1;i<led.length;i++){ if(led[i][2]===prev){ const it=String(led[i][3]||'').trim(); if(it&&it!=='(Wastage)') prevFwd[it]=(prevFwd[it]||0)+(Number(led[i][6])||0); } }
+  const committed={};
+  if(dept==='Pre-finishing'){ const sh=getSS().getSheetByName(LOTS_SHEET); const c=lotCols_(sh); const d=sh.getDataRange().getValues(); for(let i=1;i<d.length;i++){ const it=String(d[i][c.item]||'').trim(); if(it) committed[it]=(committed[it]||0)+(Number(d[i][c.size])||0); } }
+  const ready=[];
+  Object.keys(prevFwd).forEach(function(it){ const r=round((prevFwd[it]||0)-(committed[it]||0)); if(r>0.001) ready.push({item:it,ready:r}); });
+  ready.sort(function(a,b){return a.item<b.item?-1:1;});
+  return {ok:true,prev:prev,ready:ready};
+}
+
+/* ----- LOTS (progress = forwarded rolls tagged to lot in Production) ----- */
+function setupLots(){
+  if(_SETUP.lots) return; _SETUP.lots=true;
+  const ss=getSS();
+  const LH=['Lot ID','Item','Size','Stitch Contractor','Satin SKU','Created By','Created At','Last Updated','Closed','Closed By','Closed At','Closed Note','Token'];
+  let s=ss.getSheetByName(LOTS_SHEET);
+  if(!s){ s=ss.insertSheet(LOTS_SHEET); s.getRange(1,1,1,LH.length).setValues([LH]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1); }
+  else { LH.forEach(function(h){ addColIfMissing_(s,h); }); }
+  const MH=['Timestamp','Lot ID','Stage','Action','Rolls','By','Token'];
+  let m=ss.getSheetByName(LOTMOVES_SHEET);
+  if(!m){ m=ss.insertSheet(LOTMOVES_SHEET); m.getRange(1,1,1,MH.length).setValues([MH]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); m.setFrozenRows(1); }
+  else { MH.forEach(function(h){ addColIfMissing_(m,h); }); }
+}
+function lotCols_(sh){
+  const head=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  return {id:head.indexOf('lot id'),item:head.indexOf('item'),size:head.indexOf('size'),stitch:head.indexOf('stitch contractor'),satinSku:head.indexOf('satin sku'),
+    cby:head.indexOf('created by'),cat:head.indexOf('created at'),upd:head.indexOf('last updated'),
+    closed:head.indexOf('closed'),closedBy:head.indexOf('closed by'),closedAt:head.indexOf('closed at'),closedNote:head.indexOf('closed note'),token:head.indexOf('token')};
+}
+function lotMove_(lotId,stage,action,rolls,by,token){ getSS().getSheetByName(LOTMOVES_SHEET).appendRow([new Date(),lotId,stage,action,round(rolls),by,token||'']); }
+function findLotRow_(lotId){
+  const sh=getSS().getSheetByName(LOTS_SHEET); const c=lotCols_(sh); const d=sh.getDataRange().getValues();
+  for(let i=1;i<d.length;i++){ if(String(d[i][c.id])===String(lotId)) return {sh:sh,row:i+1,data:d[i],c:c}; }
+  return null;
+}
+function lotMovesSum_(){
+  setupLots();
+  const ms=getSS().getSheetByName(LOTMOVES_SHEET); const d=ms.getDataRange().getValues();
+  const mh=d[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cLot=mh.indexOf('lot id'),cStage=mh.indexOf('stage'),cAct=mh.indexOf('action'),cRolls=mh.indexOf('rolls');
+  const sum={};
+  for(let i=1;i<d.length;i++){
+    if(String(d[i][cAct]||'').trim()!=='Forward') continue;
+    const lot=String(d[i][cLot]||'').trim(); if(!lot) continue;
+    if(!sum[lot]) sum[lot]={pre:0,print:0,post:0};
+    const st=String(d[i][cStage]||'').trim(); const r=Number(d[i][cRolls])||0;
+    if(st==='Pre-finishing') sum[lot].pre+=r; else if(st==='Printing') sum[lot].print+=r; else if(st==='Post-finishing') sum[lot].post+=r;
+  }
+  return sum;
+}
+function lotStatusOf_(row,c,prog){
+  const size=Number(row[c.size])||0; const p=prog||{pre:0,print:0,post:0};
+  const pre=Math.min(p.pre,size), pr=Math.min(p.print,size), po=Math.min(p.post,size);
+  const closed=String(row[c.closed]||'').trim()==='Yes';
+  let done=closed||po>=size, stage;
+  if(done) stage='Done'; else if(pre<size) stage='In Pre-finishing'; else if(pr<size) stage='In Printing'; else stage='In Post-finishing';
+  return {size:size,pre:pre,print:pr,po:po,post:po,done:done,closed:closed,stage:stage};
+}
+function getAllLots(user){
+  requireUser_(user); setupLots();
+  const prog=lotMovesSum_(); const sh=getSS().getSheetByName(LOTS_SHEET); const c=lotCols_(sh); const d=sh.getDataRange().getValues();
+  const lots=[];
+  for(let i=1;i<d.length;i++){ if(!d[i][c.id]) continue; const s=lotStatusOf_(d[i],c,prog[d[i][c.id]]);
+    lots.push({lotId:d[i][c.id],item:d[i][c.item],size:s.size,pre:s.pre,print:s.print,post:s.post,stage:s.stage,done:s.done,closed:s.closed,stitch:(c.stitch>=0?String(d[i][c.stitch]||'').trim():'')}); }
+  lots.reverse(); return {ok:true,lots:lots};
+}
+function getLotsWaiting(user,dept){
+  requireUser_(user); setupLots();
+  const prog=lotMovesSum_(); const sh=getSS().getSheetByName(LOTS_SHEET); const c=lotCols_(sh); const d=sh.getDataRange().getValues();
+  const out=[];
+  for(let i=1;i<d.length;i++){ if(!d[i][c.id]) continue; const s=lotStatusOf_(d[i],c,prog[d[i][c.id]]); if(s.done) continue;
+    let waiting=0;
+    if(dept==='Printing') waiting=s.pre-s.print; else if(dept==='Post-finishing') waiting=s.print-s.post; else waiting=s.size-s.pre;
+    if(waiting>0.001) out.push({lotId:d[i][c.id],item:d[i][c.item],size:s.size,waiting:round(waiting)});
+  }
+  out.reverse(); return {ok:true,lots:out};
+}
+function getOpenLotForDept(user,dept,item){
+  requireUser_(user); setupLots();
+  if(LOT_FLOW.indexOf(dept)<0) return {ok:true,lot:null};
+  item=String(item||'').trim();
+  const prog=lotMovesSum_(); const sh=getSS().getSheetByName(LOTS_SHEET); const c=lotCols_(sh); const d=sh.getDataRange().getValues();
+  for(let i=1;i<d.length;i++){ if(String(d[i][c.item]||'').trim()!==item) continue; const s=lotStatusOf_(d[i],c,prog[d[i][c.id]]); if(s.done) continue;
+    const deptDone = dept==='Pre-finishing'?s.pre : dept==='Printing'?s.print : s.post;
+    if(deptDone<s.size) return {ok:true,lot:{lotId:d[i][c.id],size:s.size}};
+  }
+  return {ok:true,lot:null};
+}
+function getLotProgram(user,lotId){
+  requireUser_(user); setupLots();
+  const f=findLotRow_(lotId); if(!f) return {ok:false,msg:'Lot not found'};
+  const prog=lotMovesSum_(); const s=lotStatusOf_(f.data,f.c,prog[lotId]);
+  const res={ok:true,lotId:lotId,item:f.data[f.c.item],size:s.size,print:s.print};
+  res.program=getProgram(user,f.data[f.c.item]);
+  return res;
+}
+function createLot(user,item,size,token,stitch,satinSku){
+  const u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.mdo) throw new Error('Only MDO/Admin can create lots (WIP).'); setupLots();
+  item=String(item||'').trim(); size=round(size); stitch=String(stitch||'').trim(); satinSku=String(satinSku||'').trim();
+  if(!item) return {ok:false,msg:'Select item'};
+  if(!(size>0)) return {ok:false,msg:'Enter lot size'};
+  const lock=LockService.getScriptLock();
+  try{ lock.waitLock(15000);}catch(e){ return {ok:false,msg:'Server busy, tap again'};}
+  try{
+    const sh=getSS().getSheetByName(LOTS_SHEET); const c=lotCols_(sh); const d=sh.getDataRange().getValues();
+    if(token && c.token>=0){ for(let i=1;i<d.length;i++){ if(String(d[i][c.token])===String(token)) return {ok:true,lotId:d[i][c.id],size:Number(d[i][c.size])||0,dup:true}; } }
+    const prog=lotMovesSum_();
+    for(let i=1;i<d.length;i++){ if(String(d[i][c.item]||'').trim()!==item) continue; const s=lotStatusOf_(d[i],c,prog[d[i][c.id]]); if(!s.done) return {ok:false,msg:'Finish '+d[i][c.id]+' first (one lot per item)'}; }
+    const prevOfPre=PRODUCTION_DEPARTMENTS[PRODUCTION_DEPARTMENTS.indexOf('Pre-finishing')-1];
+    const led=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+    let raschelFwd=0, committed=0;
+    for(let i=1;i<led.length;i++){ if(led[i][2]===prevOfPre && String(led[i][3]||'').trim()===item) raschelFwd+=(Number(led[i][6])||0); }
+    for(let i=1;i<d.length;i++){ if(String(d[i][c.item]||'').trim()===item) committed+=(Number(d[i][c.size])||0); }
+    const ready=round(raschelFwd-committed);
+    if(size>ready) return {ok:false,short:true,ready:ready,msg:'Only '+ready+' rolls ready — cannot make a '+size+'-roll lot'};
+    const id='LOT-'+pad4(Math.max(0,sh.getLastRow()-1)+1);
+    const width=sh.getLastColumn(); const arr=new Array(width).fill('');
+    arr[c.id]=id; arr[c.item]=item; arr[c.size]=size; arr[c.cby]=u.name; arr[c.cat]=new Date(); arr[c.upd]=new Date(); arr[c.token]=token||'';
+    if(c.stitch>=0) arr[c.stitch]=stitch;
+    if(c.satinSku>=0) arr[c.satinSku]=satinSku;
+    sh.appendRow(arr);
+    lotMove_(id,'Pre-finishing','Created',0,u.name,'');
+    logAudit_(u,'Lot Created',id+' · '+item+' · '+size+' rolls');
+    return {ok:true,lotId:id,size:size};
+  } finally{ lock.releaseLock(); }
+}
+function recordLotForwards(user,dept,rows,token){
+  requireUser_(user); setupLots();
+  if(LOT_FLOW.indexOf(dept)<0) return {ok:true,tagged:0};
+  if(!rows||!rows.length) return {ok:true,tagged:0};
+  const lock=LockService.getScriptLock();
+  try{ lock.waitLock(15000);}catch(e){ return {ok:false,msg:'busy'};}
+  try{
+    const ms=getSS().getSheetByName(LOTMOVES_SHEET);
+    const mh=ms.getRange(1,1,1,ms.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();});
+    const cTok=mh.indexOf('token');
+    if(token && cTok>=0){ const md=ms.getDataRange().getValues(); for(let i=1;i<md.length;i++){ if(String(md[i][cTok])===String(token)) return {ok:true,tagged:0,dup:true}; } }
+    let n=0;
+    rows.forEach(function(r){ const lot=String(r.lot||'').trim(); const f=round(r.forwarded); if(!lot||!(f>0)) return; ms.appendRow([new Date(),lot,dept,'Forward',f,user,token||'']); n++; });
+    return {ok:true,tagged:n};
+  } finally{ lock.releaseLock(); }
+}
+function verifyAdminPin_(name,pin){
+  const sh=getSS().getSheetByName('USERS'); if(!sh) return false;
+  const d=sh.getDataRange().getValues();
+  const head=d[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cN=head.indexOf('name'),cP=head.indexOf('pin'),cD=head.indexOf('departments'),cA=head.indexOf('active');
+  for(let i=1;i<d.length;i++){
+    if(String(d[i][cN]||'').trim().toLowerCase()!==String(name||'').trim().toLowerCase()) continue;
+    if(cA>=0 && String(d[i][cA]||'').trim().toLowerCase()==='no') return false;
+    if(String(d[i][cP]||'').trim()!==String(pin||'').trim()) return false;
+    return String(d[i][cD]||'').trim().toUpperCase()==='ALL';
+  }
+  return false;
+}
+function forceDoneLot(user,pin,lotId){
+  requireUser_(user); setupLots();
+  if(!verifyAdminPin_(user,pin)) return {ok:false,msg:'Admin PIN wrong or not an ALL-access admin'};
+  const f=findLotRow_(lotId); if(!f) return {ok:false,msg:'Lot not found'};
+  if(String(f.data[f.c.closed]||'').trim()==='Yes') return {ok:false,msg:'Already done'};
+  f.sh.getRange(f.row,f.c.closed+1).setValue('Yes');
+  f.sh.getRange(f.row,f.c.closedBy+1).setValue(user);
+  f.sh.getRange(f.row,f.c.closedAt+1).setValue(new Date());
+  f.sh.getRange(f.row,f.c.closedNote+1).setValue('Force done (shortfall)');
+  f.sh.getRange(f.row,f.c.upd+1).setValue(new Date());
+  lotMove_(lotId,'Done','Force Done',0,user,'');
+  return {ok:true};
+}
+/* ---------- REPORTING DASHBOARD (admins only) ---------- */
+function isAllAdmin_(user){
+  const sh=getSS().getSheetByName('USERS'); if(!sh) return false;
+  const d=sh.getDataRange().getValues();
+  const head=d[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cN=head.indexOf('name'),cD=head.indexOf('departments'),cA=head.indexOf('active');
+  for(let i=1;i<d.length;i++){
+    if(String(d[i][cN]||'').trim().toLowerCase()!==String(user||'').trim().toLowerCase()) continue;
+    if(cA>=0 && String(d[i][cA]||'').trim().toLowerCase()==='no') return false;
+    return String(d[i][cD]||'').trim().toUpperCase()==='ALL';
+  }
+  return false;
+}
+function dayKey_(d){ try{ return Utilities.formatDate(new Date(d),Session.getScriptTimeZone(),'yyyy-MM-dd'); }catch(e){ return ''; } }
+function inRange_(d,from,to){ const k=dayKey_(d); if(!k) return false; return k>=from && k<=to; }
+function rangeFromPreset_(preset){
+  const tz=Session.getScriptTimeZone(); const now=new Date();
+  const today=Utilities.formatDate(now,tz,'yyyy-MM-dd');
+  if(preset==='today') return {from:today,to:today};
+  if(preset==='week'){ const wd=(now.getDay()+6)%7; const mon=new Date(now); mon.setDate(now.getDate()-wd); return {from:Utilities.formatDate(mon,tz,'yyyy-MM-dd'),to:today}; }
+  if(preset==='month'){ const first=new Date(now.getFullYear(),now.getMonth(),1); return {from:Utilities.formatDate(first,tz,'yyyy-MM-dd'),to:today}; }
+  return {from:today,to:today};
+}
+function getReport(user,opts){
+  if(!isAllAdmin_(user)) return {ok:false,msg:'Reports are for admins only'};
+  opts=opts||{};
+  let from,to;
+  if(opts.from && opts.to){ from=opts.from; to=opts.to; }
+  else { const r=rangeFromPreset_(opts.preset||'today'); from=r.from; to=r.to; }
+
+  const led=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+  const prod={}, waste={}, dispItem={};
+  let totFwdR=0, totRecvR=0, totWasteKg=0;
+  for(let i=1;i<led.length;i++){
+    const row=led[i]; const dt=row[1]; if(!inRange_(dt,from,to)) continue;
+    const dept=row[2], item=String(row[3]||'').trim();
+    const recv=Number(row[4])||0, fwd=Number(row[6])||0;
+    if(item==='(Wastage)'){ const wk=Number(row[4])||Number(row[6])||0; waste[dept]=(waste[dept]||0)+wk; totWasteKg+=wk; continue; }
+    if(dept===DISPATCH_DEPT){ dispItem[item]=(dispItem[item]||0)+Math.abs(fwd||recv); continue; }
+    if(!prod[dept]) prod[dept]={};
+    prod[dept][item]=(prod[dept][item]||0)+fwd;
+    totFwdR+=fwd; totRecvR+=recv;
+  }
+  const production=[];
+  Object.keys(prod).forEach(function(dep){ const items=[]; let dr=0; Object.keys(prod[dep]).forEach(function(it){ const r=round(prod[dep][it]); items.push({item:it,rolls:r}); dr+=r; }); items.sort(function(a,b){return b.rolls-a.rolls;}); production.push({dept:dep,rolls:round(dr),items:items}); });
+  const wastage=[]; Object.keys(waste).forEach(function(dep){ wastage.push({dept:dep,kg:round(waste[dep])}); }); wastage.sort(function(a,b){return b.kg-a.kg;});
+
+  let qcSessions=0, qcPieces=0, qcWt=0, qcPass=0, qcFail=0; const qcByContr={};
+  const qs=getSS().getSheetByName(SHEETS.QCSESS);
+  if(qs){ const qd=qs.getDataRange().getValues(); const qh=qd[0].map(function(x){return String(x||'').trim().toLowerCase();});
+    const cTs=qh.indexOf('started')>=0?qh.indexOf('started'):0, cContr=qh.indexOf('contractor');
+    for(let i=1;i<qd.length;i++){ if(!inRange_(qd[i][cTs],from,to)) continue; qcSessions++; if(cContr>=0){ const cc=String(qd[i][cContr]||'').trim()||'—'; qcByContr[cc]=(qcByContr[cc]||0)+1; } } }
+  const qp=getSS().getSheetByName(SHEETS.QCPIECE);
+  if(qp){ const pd=qp.getDataRange().getValues(); const ph=pd[0].map(function(x){return String(x||'').trim().toLowerCase();});
+    const cTs=0, cWt=ph.indexOf('weight'); const checkCols=[]; ph.forEach(function(hh,idx){ if(['printing','feel','slitting fault','satin','roughness','mending'].indexOf(hh)>=0) checkCols.push(idx); });
+    for(let i=1;i<pd.length;i++){ if(!inRange_(pd[i][cTs],from,to)) continue; qcPieces++; if(cWt>=0) qcWt+=Number(pd[i][cWt])||0; let bad=false; checkCols.forEach(function(ci){ const v=String(pd[i][ci]||'').toLowerCase(); if(v==='bad'||v==='✗'||v==='x'||v==='fail'||v==='no') bad=true; }); if(bad) qcFail++; else qcPass++; } }
+  const qcContr=[]; Object.keys(qcByContr).forEach(function(k){ qcContr.push({contractor:k,sessions:qcByContr[k]}); });
+
+  let contractor=[];
+  try{ contractor=getContractorBalance(user)||[]; }catch(e){ contractor=[]; }
+  const contractorSummary=contractor.map(function(c){ return {contractor:c.contractor,balance:c.totBalance,packed:c.totPacked,disp:c.totDisp}; });
+
+  const dispatch=[]; let totDispBore=0; Object.keys(dispItem).forEach(function(it){ const b=round(dispItem[it]); dispatch.push({item:it,bore:b}); totDispBore+=b; }); dispatch.sort(function(a,b){return b.bore-a.bore;});
+
+  let lotsOpen=0, lotsDone=0;
+  try{ const al=getAllLots(user); (al.lots||[]).forEach(function(l){ if(l.done) lotsDone++; else lotsOpen++; }); }catch(e){}
+
+  return {ok:true, from:from, to:to,
+    totals:{ forwardedRolls:round(totFwdR), receivedRolls:round(totRecvR), wasteKg:round(totWasteKg), dispatchBore:round(totDispBore), qcPieces:qcPieces, qcSessions:qcSessions },
+    production:production, wastage:wastage,
+    qc:{ sessions:qcSessions, pieces:qcPieces, weight:round(qcWt), pass:qcPass, fail:qcFail, passRate:(qcPass+qcFail)>0?Math.round(qcPass*100/(qcPass+qcFail)):0, byContractor:qcContr },
+    contractor:contractorSummary,
+    dispatch:dispatch,
+    lots:{ open:lotsOpen, done:lotsDone }
+  };
+}
+
+/* ---------- RASCHEL: Warping + Knitting + Slitting ---------- */
+const WARPING_SHEET='WARPING';
+const KNITTING_SHEET='KNITTING';
+const MACHINES_SHEET='MACHINES';
+const RASCHEL_DEPT='Raschel (Gray)';
+
+function ensureRaschel_(){
+  if(_SETUP.raschel) return; _SETUP.raschel=true;
+  const ss=getSS();
+  if(!ss.getSheetByName(WARPING_SHEET)){
+    const w=ss.insertSheet(WARPING_SHEET);
+    const h=['Timestamp','Date','Yarn Count','Boxes Opened','Beams Made','Yarn Wastage (kg)','Entry By','Notes'];
+    w.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); w.setFrozenRows(1);
+  }
+  addColIfMissing_(ss.getSheetByName(WARPING_SHEET),'Yarn Count');
+  if(!ss.getSheetByName(KNITTING_SHEET)){
+    const k=ss.insertSheet(KNITTING_SHEET);
+    const h=['Timestamp','Date','Machine','Operator','Quality','Weight (kg)','Meter','Change (stoppage reason)','Entry By'];
+    k.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); k.setFrozenRows(1);
+  }
+  let m=ss.getSheetByName(MACHINES_SHEET);
+  if(!m){
+    m=ss.insertSheet(MACHINES_SHEET);
+    m.getRange(1,1,1,2).setValues([['Machine','Active']]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); m.setFrozenRows(1);
+    const rows=[]; for(let i=1;i<=21;i++){ rows.push(['M'+i,'Yes']); }
+    m.getRange(2,1,rows.length,2).setValues(rows);
+  }
+}
+function getMachineList_(){
+  ensureRaschel_();
+  const m=getSS().getSheetByName(MACHINES_SHEET); const d=m.getDataRange().getValues();
+  const head=d[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cN=head.indexOf('machine'),cA=head.indexOf('active');
+  const out=[];
+  for(let i=1;i<d.length;i++){ const n=String(d[i][cN]||'').trim(); if(!n) continue; if(cA>=0 && String(d[i][cA]).trim().toLowerCase()==='no') continue; out.push(n); }
+  return out;
+}
+function getRaschelConfig(user){
+  requireDept_(user,RASCHEL_DEPT); ensureRaschel_();
+  return {machines:getMachineList_(),items:ITEMS,rollKg:ROLL_KG};
+}
+function warpCol_(){ const sh=getSS().getSheetByName(WARPING_SHEET); const head=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();}); const m={}; head.forEach(function(h,i){m[h]=i;}); return m; }
+function saveWarping(e){
+  const u=requireDept_(e.user,RASCHEL_DEPT); ensureRaschel_();
+  const date=e.date||dateKey(new Date());
+  const boxes=round(e.boxes), beams=round(e.beams), wastage=round(e.wastage);
+  const yarnCount=String(e.yarnCount||'').trim();
+  const sh=getSS().getSheetByName(WARPING_SHEET); const wc=warpCol_(); const arr=new Array(sh.getLastColumn()).fill('');
+  arr[wc['timestamp']]=new Date(); arr[wc['date']]=date;
+  if(wc['yarn count']!==undefined) arr[wc['yarn count']]=yarnCount;
+  arr[wc['boxes opened']]=boxes; arr[wc['beams made']]=beams; arr[wc['yarn wastage (kg)']]=wastage; arr[wc['entry by']]=u.name;
+  if(wc['notes']!==undefined) arr[wc['notes']]=e.notes||'';
+  sh.appendRow(arr);
+  logAudit_(u,'Warping Entry',date+' · '+(yarnCount?(yarnCount+' · '):'')+'boxes '+boxes+' · beams '+beams);
+  return {ok:true};
+}
+function saveKnitting(e){
+  const u=requireDept_(e.user,RASCHEL_DEPT); ensureRaschel_();
+  const date=e.date||dateKey(new Date());
+  const rows=e.rows||[];
+  const sh=getSS().getSheetByName(KNITTING_SHEET);
+  let saved=0, totKg=0, totMeter=0;
+  rows.forEach(function(r){
+    const machine=String(r.machine||'').trim();
+    const operator=String(r.operator||'').trim();
+    const quality=String(r.quality||'').trim();
+    const weight=round(r.weight);
+    const meter=round(r.meter);
+    const change=String(r.change||'').trim();
+    if(!machine) return;
+    if(!(weight>0) && !change && !operator) return;
+    sh.appendRow([new Date(),date,machine,operator,quality,weight,meter,change,u.name]);
+    saved++; totKg+=weight; totMeter+=meter;
+  });
+  logAudit_(u,'Knitting Entry',date+' · '+saved+' machines · '+round(totKg)+' kg');
+  return {ok:true,saved:saved,totalKg:round(totKg),totalMeter:round(totMeter)};
+}
+function saveSlitting(e){
+  const u=requireDept_(e.user,RASCHEL_DEPT); ensureRaschel_();
+  const date=e.date||dateKey(new Date());
+  const rows=e.rows||[];
+  const led=getSS().getSheetByName(SHEETS.LEDGER);
+  let saved=0, totFwd=0; var _out=[];
+  rows.forEach(function(r){
+    const quality=String(r.quality||'').trim();
+    const slit=round(r.rollsSlit);
+    if(!quality || !(slit>0)) return;
+    const fwd=round(slit*2);
+    const w=ROLL_KG[quality]||0;
+    const fwdKg=round(fwd*w);
+    _out.push([new Date(),date,RASCHEL_DEPT,quality,fwd,fwdKg,fwd,fwdKg,0,0,0,u.name,'Slitting: '+slit+' rolls slit -> '+fwd+' forwarded']);
+    saved++; totFwd+=fwd;
+  });
+  if(_out.length) led.getRange(led.getLastRow()+1,1,_out.length,_out[0].length).setValues(_out);
+  logAudit_(u,'Slitting Entry',date+' · '+saved+' qualities · '+round(totFwd)+' rolls forwarded');
+  return {ok:true,saved:saved,forwarded:round(totFwd)};
+}
+function getRaschelDay(user,date){
+  requireDept_(user,RASCHEL_DEPT); ensureRaschel_();
+  date=String(date||dateKey(new Date()));
+  const wsh=getSS().getSheetByName(WARPING_SHEET).getDataRange().getValues(); const wc=warpCol_();
+  let wBoxes=0,wBeams=0,wWaste=0,wAny=false;
+  for(let i=1;i<wsh.length;i++){ if(dateKey(wsh[i][wc['date']])===date){ wBoxes+=Number(wsh[i][wc['boxes opened']])||0; wBeams+=Number(wsh[i][wc['beams made']])||0; wWaste+=Number(wsh[i][wc['yarn wastage (kg)']])||0; wAny=true; } }
+  const warping=wAny?{boxes:round(wBoxes),beams:round(wBeams),wastage:round(wWaste)}:null;
+  const ksh=getSS().getSheetByName(KNITTING_SHEET).getDataRange().getValues();
+  let knitKg=0, knitMeter=0, knitRows=0;
+  for(let i=1;i<ksh.length;i++){ if(dateKey(ksh[i][1])===date){ knitKg+=Number(ksh[i][5])||0; knitMeter+=Number(ksh[i][6])||0; knitRows++; } }
+  const led=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+  let slitFwd=0;
+  for(let i=1;i<led.length;i++){ if(led[i][2]===RASCHEL_DEPT && dateKey(led[i][1])===date && String(led[i][12]||'').indexOf('Slitting:')>=0){ slitFwd+=Number(led[i][6])||0; } }
+  return {ok:true,date:date,warping:warping,knitKg:round(knitKg),knitMeter:round(knitMeter),knitRows:knitRows,slitForwarded:round(slitFwd)};
+}
+
+/* ======================= DROP 2 — INWARD / YARN STOCK / BAG STOCK / ACCOUNTS ======================= */
+const INWARD_SHEET='INWARD';
+const RATES_SHEET='RATES';
+const PAYMENTS_SHEET='PAYMENTS';
+
+function setupDrop2_(){
+  if(_SETUP.drop2) return; _SETUP.drop2=true;
+  const ss=getSS();
+  if(!ss.getSheetByName(INWARD_SHEET)){
+    const s=ss.insertSheet(INWARD_SHEET);
+    const h=['Inward ID','Date','Bill No','Party Name','Item','Qty','Unit','Bill Photo','Entry By','Timestamp'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+  addColIfMissing_(ss.getSheetByName(INWARD_SHEET),'Bill Photo');
+  if(!ss.getSheetByName(RATES_SHEET)){
+    const s=ss.insertSheet(RATES_SHEET);
+    const h=['Type','Name','Rate','Updated By','Updated At'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+    const seed=[];
+    Object.keys(ITEMS).forEach(function(q){ seed.push(['Item',q,0,'',new Date()]); });
+    ['Bora','Bale','Pcs'].forEach(function(uu){ seed.push(['Tempu',uu,0,'',new Date()]); });
+    if(seed.length) s.getRange(2,1,seed.length,5).setValues(seed);
+  }
+  if(!ss.getSheetByName(PAYMENTS_SHEET)){
+    const s=ss.insertSheet(PAYMENTS_SHEET);
+    const h=['Timestamp','Type','Name','Amount','Note','By'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+  const u=ss.getSheetByName(SHEETS.USERS);
+  if(u){ addColIfMissing_(u,'Inward'); defaultFillCol_(u,'Inward','No'); }
+}
+function colMapOf_(sheetName){ const sh=getSS().getSheetByName(sheetName); const head=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();}); const m={}; head.forEach(function(h,i){m[h]=i;}); return m; }
+function isYarnCount_(s){ return /\d+\s*\/\s*\d+/.test(String(s||'')); }
+function isBagItem_(s){ return String(s||'').toLowerCase().indexOf('bag')>=0; }
+
+/* ---- INWARD (gate) ---- */
+function getInwardConfig(user){
+  const u=requireUser_(user); if(!(u.can.inward||u.can.security||isAllAdmin_(user))) throw new Error('No inward access.');
+  setupDrop2_(); return {items:ITEMS};
+}
+function saveInward(e){
+  const u=requireUser_(e.user); if(!(u.can.inward||u.can.security||isAllAdmin_(e.user))) throw new Error('No inward access.');
+  setupDrop2_();
+  const billNo=String(e.billNo||'').trim(); const party=String(e.party||'').trim();
+  const date=e.date||dateKey(new Date());
+  const items=e.items||[];
+  if(!party) return {ok:false,msg:'Enter party name'};
+  let valid=items.filter(function(it){ return String(it.item||'').trim() && (Number(it.qty)||0)>0; });
+  if(!valid.length) return {ok:false,msg:'Add at least one item with qty'};
+  const sh=getSS().getSheetByName(INWARD_SHEET); const mc=colMapOf_(INWARD_SHEET);
+  const id='IN-'+pad4(Math.max(0,sh.getLastRow()-1)+1);
+  let photoUrl=''; if(e.photo){ try{ photoUrl=savePhotoTo_(e.photo,id+'.jpg','Romero Inward Bills'); }catch(err){ photoUrl=''; } }
+  valid.forEach(function(it){
+    const arr=new Array(sh.getLastColumn()).fill('');
+    arr[mc['inward id']]=id; arr[mc['date']]=date; arr[mc['bill no']]=billNo; arr[mc['party name']]=party;
+    arr[mc['item']]=String(it.item).trim(); arr[mc['qty']]=round(it.qty); arr[mc['unit']]=String(it.unit||'').trim();
+    if(mc['bill photo']!==undefined) arr[mc['bill photo']]=photoUrl;
+    arr[mc['entry by']]=u.name; arr[mc['timestamp']]=new Date();
+    sh.appendRow(arr);
+  });
+  logAudit_(u,'Inward '+id,'Bill '+billNo+' · '+party+' · '+valid.length+' items');
+  return {ok:true,id:id,saved:valid.length};
+}
+function getInwardList(user){
+  const u=requireUser_(user); if(!(u.can.inward||u.can.security||isAllAdmin_(user))) throw new Error('No inward access.');
+  setupDrop2_(); const sh=getSS().getSheetByName(INWARD_SHEET); const d=sh.getDataRange().getValues(); const mc=colMapOf_(INWARD_SHEET);
+  const groups={}; const order=[];
+  for(let i=1;i<d.length;i++){ const id=d[i][mc['inward id']]; if(!id) continue;
+    if(!groups[id]){ groups[id]={id:id,date:dateKey(d[i][mc['date']]),billNo:d[i][mc['bill no']],party:d[i][mc['party name']],by:d[i][mc['entry by']],billPhoto:(mc['bill photo']!==undefined?(d[i][mc['bill photo']]||''):''),items:[]}; order.push(id); }
+    groups[id].items.push({item:d[i][mc['item']],qty:round(Number(d[i][mc['qty']])||0),unit:d[i][mc['unit']]});
+  }
+  const out=order.map(function(id){return groups[id];}); out.reverse(); return out.slice(0,60);
+}
+
+/* ---- YARN STOCK (inward boxes by count − warping boxes opened by count) ---- */
+function getYarnStock(user){
+  requireUser_(user); setupDrop2_(); ensureRaschel_();
+  const inSh=getSS().getSheetByName(INWARD_SHEET).getDataRange().getValues(); const ic=colMapOf_(INWARD_SHEET);
+  const inMap={};
+  for(let i=1;i<inSh.length;i++){ const it=String(inSh[i][ic['item']]||'').trim(); if(!isYarnCount_(it)) continue; const key=it.replace(/\s+/g,''); inMap[key]=(inMap[key]||0)+(Number(inSh[i][ic['qty']])||0); }
+  const wSh=getSS().getSheetByName(WARPING_SHEET).getDataRange().getValues(); const wc=warpCol_();
+  const opMap={};
+  if(wc['yarn count']!==undefined){ for(let i=1;i<wSh.length;i++){ const c=String(wSh[i][wc['yarn count']]||'').trim(); if(!c) continue; const key=c.replace(/\s+/g,''); opMap[key]=(opMap[key]||0)+(Number(wSh[i][wc['boxes opened']])||0); } }
+  const keys={}; Object.keys(inMap).forEach(function(k){keys[k]=1;}); Object.keys(opMap).forEach(function(k){keys[k]=1;});
+  const rows=Object.keys(keys).sort().map(function(k){ const inn=round(inMap[k]||0), op=round(opMap[k]||0); return {count:k,inward:inn,opened:op,balance:round(inn-op)}; });
+  return {rows:rows};
+}
+
+/* ---- BAG STOCK (inward bags − with-bag dispatch bags) ---- */
+function getBagStock(user){
+  requireUser_(user); setupDrop2_(); ensureOrders_();
+  const inSh=getSS().getSheetByName(INWARD_SHEET).getDataRange().getValues(); const ic=colMapOf_(INWARD_SHEET);
+  let bagIn=0;
+  for(let i=1;i<inSh.length;i++){ const it=String(inSh[i][ic['item']]||'').trim(); if(isBagItem_(it)) bagIn+=(Number(inSh[i][ic['qty']])||0); }
+  const dSh=getSS().getSheetByName(DISPATCHES_SHEET); let bagUsed=0;
+  if(dSh){ const dd=dSh.getDataRange().getValues(); const dm=dispCol_();
+    for(let i=1;i<dd.length;i++){ if(dm['with bag']!==undefined && String(dd[i][dm['with bag']]||'').toLowerCase()==='yes'){ bagUsed+=(Number(dd[i][dm['bags']])||0); } } }
+  return {inward:round(bagIn),used:round(bagUsed),balance:round(bagIn-bagUsed)};
+}
+
+/* ---- CONTRACTOR / TEMPU ACCOUNTS ---- */
+function rateOf_(type,name){ const sh=getSS().getSheetByName(RATES_SHEET); if(!sh) return 0; const d=sh.getDataRange().getValues(); const mc=colMapOf_(RATES_SHEET);
+  for(let i=1;i<d.length;i++){ if(String(d[i][mc['type']]||'').trim().toLowerCase()===type.toLowerCase() && String(d[i][mc['name']]||'').trim().toLowerCase()===String(name||'').trim().toLowerCase()) return Number(d[i][mc['rate']])||0; }
+  return 0; }
+function paidOf_(type,name){ const sh=getSS().getSheetByName(PAYMENTS_SHEET); if(!sh) return 0; const d=sh.getDataRange().getValues(); const mc=colMapOf_(PAYMENTS_SHEET); let s=0;
+  for(let i=1;i<d.length;i++){ if(String(d[i][mc['type']]||'').trim().toLowerCase()===type.toLowerCase() && String(d[i][mc['name']]||'').trim().toLowerCase()===String(name||'').trim().toLowerCase()) s+=Number(d[i][mc['amount']])||0; }
+  return round(s); }
+function getAccounts(user){
+  const u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.contractor_balance) throw new Error('No accounts access.');
+  setupDrop2_(); ensureOrders_();
+  const dSh=getSS().getSheetByName(DISPATCHES_SHEET); const contr={}, tempu={};
+  if(dSh){ const dd=dSh.getDataRange().getValues(); const dm=dispCol_();
+    for(let i=1;i<dd.length;i++){ if(!dd[i][dm['dispatch id']]) continue;
+      const c=String(dd[i][dm['contractor']]||'').trim(); const t=String(dd[i][dm['tempu']]||'').trim();
+      let pq={}; try{ pq=JSON.parse(dd[i][dm['per-quality json']]||'{}')||{}; }catch(e){ pq={}; }
+      if(c){ contr[c]=contr[c]||{items:{}}; Object.keys(pq).forEach(function(q){ contr[c].items[q]=(contr[c].items[q]||0)+(Number(pq[q].pcs)||0); }); }
+      if(t){ tempu[t]=tempu[t]||{units:{}}; Object.keys(pq).forEach(function(q){ const unit=String(pq[q].unit||'Bora'); tempu[t].units[unit]=(tempu[t].units[unit]||0)+(Number(pq[q].count)||0); }); }
+    } }
+  const contractors=Object.keys(contr).sort().map(function(name){
+    let amount=0; const items=Object.keys(contr[name].items).sort().map(function(q){ const pcs=round(contr[name].items[q]); const rate=rateOf_('Item',q); const amt=round(pcs*rate); amount+=amt; return {item:q,pcs:pcs,rate:rate,amount:amt}; });
+    return {name:name,items:items,amount:round(amount)};
+  });
+  const tempus=Object.keys(tempu).sort().map(function(name){
+    let amount=0; const units=Object.keys(tempu[name].units).sort().map(function(unit){ const cnt=round(tempu[name].units[unit]); const rate=rateOf_('Tempu',unit); const amt=round(cnt*rate); amount+=amt; return {unit:unit,count:cnt,rate:rate,amount:amt}; });
+    return {name:name,units:units,amount:round(amount)};
+  });
+  return {contractors:contractors,tempus:tempus};
+}
+function setRate(user,type,name,rate){
+  const u=requireUser_(user); if(!isAllAdmin_(user)) throw new Error('Only admin can set rates.');
+  setupDrop2_(); type=String(type||'').trim(); name=String(name||'').trim(); rate=Number(rate)||0;
+  if(!type||!name) return {ok:false,msg:'Type and name required'};
+  const sh=getSS().getSheetByName(RATES_SHEET); const mc=colMapOf_(RATES_SHEET); const d=sh.getDataRange().getValues();
+  for(let i=1;i<d.length;i++){ if(String(d[i][mc['type']]||'').trim().toLowerCase()===type.toLowerCase() && String(d[i][mc['name']]||'').trim().toLowerCase()===name.toLowerCase()){ sh.getRange(i+1,mc['rate']+1).setValue(rate); sh.getRange(i+1,mc['updated by']+1).setValue(u.name); sh.getRange(i+1,mc['updated at']+1).setValue(new Date()); logAudit_(u,'Rate Set',type+' · '+name+' = '+rate); return {ok:true}; } }
+  const arr=new Array(sh.getLastColumn()).fill(''); arr[mc['type']]=type; arr[mc['name']]=name; arr[mc['rate']]=rate; arr[mc['updated by']]=u.name; arr[mc['updated at']]=new Date(); sh.appendRow(arr);
+  logAudit_(u,'Rate Set',type+' · '+name+' = '+rate); return {ok:true};
+}
+function recordPayment(user,type,name,amount,note){
+  const u=requireUser_(user); if(!isAllAdmin_(user)) throw new Error('Only admin can record payments.');
+  setupDrop2_(); type=String(type||'').trim(); name=String(name||'').trim(); amount=Number(amount)||0;
+  if(!type||!name||!(amount>0)) return {ok:false,msg:'Type, name and amount required'};
+  const sh=getSS().getSheetByName(PAYMENTS_SHEET);
+  sh.appendRow([new Date(),type,name,amount,String(note||'').trim(),u.name]);
+  logAudit_(u,'Payment',type+' · '+name+' · '+amount);
+  return {ok:true};
+}
+
+/* ======================= ASK AI (Claude data assistant) ======================= */
+function aiSetKey(user,key){ if(!isAllAdmin_(user)) throw new Error('Only admin can set the AI key.'); PropertiesService.getScriptProperties().setProperty('ANTHROPIC_API_KEY',String(key||'').trim()); return {ok:true}; }
+function aiStatus(user){ const u=requireUser_(user); return {has:!!PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY'),admin:isAllAdmin_(user)}; }
+function aiSnapshot_(userName){
+  const out=[]; const tz=Session.getScriptTimeZone();
+  out.push('NOW: '+Utilities.formatDate(new Date(),tz,'yyyy-MM-dd EEE HH:mm'));
+  try{
+    ensureOrders_();
+    const od=getSS().getSheetByName(SHEETS.ORDERS).getDataRange().getValues(); const m=ordCol_();
+    out.push('\n== ORDERS (open) =='); const partyP={},itemP={};
+    for(let i=1;i<od.length;i++){ const orow=od[i]; const id=orow[m['order id']]; if(!id) continue; const st=String(orow[m['status']]||'').trim(); if(st==='Archived') continue;
+      const s=orderSummary_(orow,m);
+      const qd=s.perQuality.map(function(q){return q.quality+'('+q.unit+'): ordered '+q.ordered+', dispatched '+q.dispatched+', pending '+q.pending+(q.over>0?(', OVER '+q.over):'');}).join('; ');
+      out.push(id+' | '+String(orow[m['customer']]||'')+' | date '+dateKey(orow[m['date']])+' | '+st+' | totalPending '+s.totalPending+' | '+qd);
+      if(s.totalPending>0){ const c=String(orow[m['customer']]||'').trim()||'-'; partyP[c]=(partyP[c]||0)+s.totalPending; s.perQuality.forEach(function(q){ if(q.pending>0) itemP[q.quality]=(itemP[q.quality]||0)+q.pending; }); }
+    }
+    out.push('PENDING by party: '+Object.keys(partyP).map(function(k){return k+'='+partyP[k];}).join(', '));
+    out.push('PENDING by item: '+Object.keys(itemP).map(function(k){return k+'='+itemP[k];}).join(', '));
+  }catch(e){ out.push('(orders unavailable)'); }
+  try{ const ys=getYarnStock(userName); if(ys.rows&&ys.rows.length){ out.push('\n== YARN STOCK (count: inward/opened/balance boxes) =='); ys.rows.forEach(function(r){ out.push(r.count+': '+r.inward+'/'+r.opened+'/'+r.balance); }); } }catch(e){}
+  try{ const bs=getBagStock(userName); out.push('\n== BAG STOCK == inward '+bs.inward+', used '+bs.used+', balance '+bs.balance); }catch(e){}
+  try{ const ac=getAccounts(userName); out.push('\n== CONTRACTOR ACCOUNTS (pcs / amount / paid / pending) =='); ac.contractors.forEach(function(x){out.push(x.name+': '+x.pcs+' pcs, amt '+x.amount+', paid '+x.paid+', pending '+x.pending);}); out.push('== TEMPU (bora / amount / paid / pending) =='); ac.tempus.forEach(function(x){out.push(x.name+': '+x.bags+' bora, amt '+x.amount+', paid '+x.paid+', pending '+x.pending);}); }catch(e){}
+  try{ const inSh=getSS().getSheetByName(INWARD_SHEET); if(inSh){ const dd=inSh.getDataRange().getValues(); const ic=colMapOf_(INWARD_SHEET); out.push('\n== RECENT INWARD (latest 15) =='); let cnt=0; for(let j=dd.length-1;j>=1 && cnt<15;j--){ if(!dd[j][ic['inward id']]) continue; out.push(dateKey(dd[j][ic['date']])+' | '+dd[j][ic['party name']]+' | '+dd[j][ic['item']]+' '+dd[j][ic['qty']]+' '+(dd[j][ic['unit']]||'')+(dd[j][ic['bill no']]?(' | bill '+dd[j][ic['bill no']]):'')); cnt++; } } }catch(e){}
+  let txt=out.join('\n'); if(txt.length>16000) txt=txt.slice(0,16000)+'\n...(truncated)'; return txt;
+}
+function askAI(user,question,history){
+  const u=requireUser_(user);
+  const key=PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
+  if(!key) return {ok:false,msg:'AI key not set. Admin: open Ask AI tab and paste the Anthropic API key once.'};
+  question=String(question||'').trim(); if(!question) return {ok:false,msg:'Type a question'};
+  const data=aiSnapshot_(u.name);
+  const sys='You are the data assistant for Romero Home Pvt. Ltd., a Raschel/mink blanket factory. '
+    +'Answer the user ONLY using the live DATA snapshot below. If the answer is not in the data, say you do not have that info in the app. '
+    +'Be short and direct. Numbers matter — give exact figures. The user may write in Hindi/English (Hinglish); reply in the same style. '
+    +'Units: Bora/Bale/Pcs as stored. Do not invent orders, names, or numbers.\n\n=== LIVE DATA ===\n'+data;
+  const msgs=[];
+  (history||[]).slice(-6).forEach(function(mm){ if(mm&&mm.text) msgs.push({role:(mm.role==='user'?'user':'assistant'),content:String(mm.text)}); });
+  msgs.push({role:'user',content:question});
+  const model=PropertiesService.getScriptProperties().getProperty('AI_MODEL')||'claude-haiku-4-5-20251001';
+  const payload={model:model,max_tokens:800,system:sys,messages:msgs};
+  let res;
+  try{ res=UrlFetchApp.fetch('https://api.anthropic.com/v1/messages',{method:'post',contentType:'application/json',headers:{'x-api-key':key,'anthropic-version':'2023-06-01'},payload:JSON.stringify(payload),muteHttpExceptions:true}); }
+  catch(err){ return {ok:false,msg:'Network error: '+err}; }
+  const code=res.getResponseCode(); const body=res.getContentText();
+  if(code!==200) return {ok:false,msg:'AI error ('+code+'): '+String(body).slice(0,300)};
+  let j; try{ j=JSON.parse(body); }catch(e){ return {ok:false,msg:'Bad AI response'}; }
+  let text=''; (j.content||[]).forEach(function(b){ if(b.type==='text') text+=b.text; });
+  logAudit_(u,'Ask AI',question.slice(0,80));
+  return {ok:true,answer:text||'(no answer)'};
+}
+
+/* ============ RASCHEL KNITTING — scan handwritten sheet (Claude vision) ============ */
+function scanKnittingSheet(user, photo){
+  const u=requireDept_(user, RASCHEL_DEPT); ensureRaschel_();
+  const key=PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
+  if(!key) return {ok:false,msg:'AI key not set — admin can add it once in the Ask AI tab.'};
+  if(!photo) return {ok:false,msg:'No photo'};
+  const b64=(String(photo).indexOf(',')>=0)?String(photo).split(',')[1]:String(photo);
+  const machines=getMachineList_(); const quals=Object.keys(ITEMS);
+  const legend=quals.map(function(q){ var mm=q.match(/\(([^)]+)\)/); return (mm?mm[1]:q)+' = '+q; }).join(', ');
+  const prompt='You are reading a handwritten daily KNITTING production sheet from a Raschel blanket factory. '
+    +'The sheet has pre-printed machine rows. Columns per row: Machine (printed label), Operator (handwritten name), Quality (a short letter code), Weight in Kg (handwritten digits, often one digit per box), Meter (digits), Change/stoppage (free text). '
+    +'Valid machine labels, use these EXACT strings: '+machines.join(', ')+'. '
+    +'Quality codes: '+legend+'. When you see a code, output the full matching quality string from that list. '
+    +'Read every row that has any handwriting. Digits may be messy; read each box carefully. '
+    +'Return ONLY a JSON object, no markdown, in exactly this shape: '
+    +'{"date":"YYYY-MM-DD or empty","rows":[{"machine":"<exact label>","operator":"","quality":"<full quality or empty>","weight":0,"meter":0,"change":""}]}. '
+    +'Skip machines with no data. Use 0 for blank numbers and empty string for blank text.';
+  const model=PropertiesService.getScriptProperties().getProperty('AI_MODEL')||'claude-haiku-4-5-20251001';
+  const payload={model:model,max_tokens:2000,messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},{type:'text',text:prompt}]}]};
+  let res; try{ res=UrlFetchApp.fetch('https://api.anthropic.com/v1/messages',{method:'post',contentType:'application/json',headers:{'x-api-key':key,'anthropic-version':'2023-06-01'},payload:JSON.stringify(payload),muteHttpExceptions:true}); }catch(err){ return {ok:false,msg:'Network error: '+err}; }
+  const code=res.getResponseCode(); const body=res.getContentText();
+  if(code!==200) return {ok:false,msg:'AI error ('+code+'): '+String(body).slice(0,200)};
+  let j; try{ j=JSON.parse(body); }catch(e){ return {ok:false,msg:'Bad AI response'}; }
+  let text=''; (j.content||[]).forEach(function(b){ if(b.type==='text') text+=b.text; });
+  text=text.replace(/```json/gi,'').replace(/```/g,'').trim();
+  const s=text.indexOf('{'), e2=text.lastIndexOf('}'); if(s>=0&&e2>s) text=text.slice(s,e2+1);
+  let parsed; try{ parsed=JSON.parse(text); }catch(err){ return {ok:false,msg:'Could not read the sheet. Try a clearer, flatter photo.'}; }
+  const validM={}; machines.forEach(function(m){validM[m.toLowerCase()]=m;});
+  const qmap={}; quals.forEach(function(q){ qmap[q.toLowerCase()]=q; var mm=q.match(/\(([^)]+)\)/); if(mm) qmap[mm[1].toLowerCase()]=q; });
+  const rows=(parsed.rows||[]).map(function(r){
+    const ml=validM[String(r.machine||'').trim().toLowerCase()]||String(r.machine||'').trim();
+    let q=String(r.quality||'').trim(); if(q&&qmap[q.toLowerCase()]) q=qmap[q.toLowerCase()];
+    return {machine:ml,operator:String(r.operator||'').trim(),quality:q,weight:(Number(r.weight)||0),meter:(Number(r.meter)||0),change:String(r.change||'').trim()};
+  }).filter(function(r){ return r.machine && validM[r.machine.toLowerCase()]; });
+  logAudit_(u,'Knitting Scan',rows.length+' machines read');
+  return {ok:true,date:(parsed.date&&/^\d{4}-\d{2}-\d{2}$/.test(parsed.date))?parsed.date:'',rows:rows};
+}
+function makeBlankKnitSheet(user){
+  const u=requireDept_(user, RASCHEL_DEPT); ensureRaschel_();
+  const machines=getMachineList_(); const quals=Object.keys(ITEMS);
+  const legend=quals.map(function(q){ var mm=q.match(/\(([^)]+)\)/); return (mm?mm[1]:q)+'='+q.replace(/\s*\([^)]*\)/,''); }).join('  ·  ');
+  function boxes(n){var s='';for(var i=0;i<n;i++){s+='<span style="display:inline-block;width:20px;height:22px;border:1px solid #333;margin-right:2px;"></span>';}return s;}
+  let rows='';
+  machines.forEach(function(m){
+    rows+='<tr>'
+      +'<td style="border:1px solid #999;padding:5px 6px;font-weight:bold;">'+m+'</td>'
+      +'<td style="border:1px solid #999;padding:5px 6px;width:120px;"></td>'
+      +'<td style="border:1px solid #999;padding:5px 6px;text-align:center;">'+boxes(2)+'</td>'
+      +'<td style="border:1px solid #999;padding:5px 6px;">'+boxes(4)+'</td>'
+      +'<td style="border:1px solid #999;padding:5px 6px;">'+boxes(5)+'</td>'
+      +'<td style="border:1px solid #999;padding:5px 6px;width:130px;"></td>'
+      +'</tr>';
+  });
+  const html='<div style="font-family:Arial;padding:20px;color:#111;">'
+    +'<div style="text-align:center;border-bottom:2px solid #0f2942;padding-bottom:6px;margin-bottom:10px;"><div style="font-size:18px;font-weight:bold;">ROMERO HOME PVT. LTD.</div><div style="font-size:13px;color:#555;">Raschel — Knitting Daily Production</div></div>'
+    +'<div style="font-size:13px;margin-bottom:10px;">Date: __ __ / __ __ / 20 __ __ &nbsp;&nbsp;&nbsp; Shift: &#9633; Day &nbsp; &#9633; Night &nbsp;&nbsp;&nbsp; Master: ____________________</div>'
+    +'<table style="width:100%;border-collapse:collapse;font-size:12px;"><tr style="background:#0f2942;color:#fff;">'
+    +'<th style="border:1px solid #999;padding:5px;">M/c</th><th style="border:1px solid #999;padding:5px;">Operator</th><th style="border:1px solid #999;padding:5px;">Quality</th><th style="border:1px solid #999;padding:5px;">Weight (Kg)</th><th style="border:1px solid #999;padding:5px;">Meter</th><th style="border:1px solid #999;padding:5px;">Change / stoppage</th></tr>'
+    +rows+'</table>'
+    +'<div style="font-size:11px;margin-top:8px;color:#444;"><b>Quality codes</b> — '+legend+'</div>'
+    +'<div style="font-size:11px;margin-top:3px;color:#444;">Har box me sirf ek digit likho. Quality me sirf code (R / L / S ...).</div>'
+    +'</div>';
+  const pdf=Utilities.newBlob(html,'text/html','k.html').getAs('application/pdf'); pdf.setName('Raschel_Knitting_Blank.pdf');
+  const file=getFolder_('Romero Print Forms').createFile(pdf); file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW);
+  logAudit_(u,'Blank Knit Sheet','generated');
+  return {ok:true,url:file.getUrl()};
+}
+
+/* ======================= STORE — auto kitting sheet + issue ======================= */
+const KITTING_SHEET='KITTING';
+const STORE_ISSUES_SHEET='STORE ISSUES';
+function setupStore_(){
+  if(_SETUP.store) return; _SETUP.store=true;
+  const ss=getSS();
+  if(!ss.getSheetByName(KITTING_SHEET)){
+    const s=ss.insertSheet(KITTING_SHEET);
+    const h=['Quality','Pcs per Roll','Sattan per Pc (m)','Labels per Pc','Polybags per Pc','Stitch Yarn per Pc (g)','Pcs per Bag','Pcs per Bora'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+    const seed=Object.keys(ITEMS).map(function(q){ return [q,1,0,1,1,0,10,20]; });
+    if(seed.length) s.getRange(2,1,seed.length,h.length).setValues(seed);
+  }
+  if(!ss.getSheetByName(STORE_ISSUES_SHEET)){
+    const s=ss.insertSheet(STORE_ISSUES_SHEET);
+    const h=['Issue ID','Date','Lot ID','Item','Rolls','Pcs','Issued To','Sattan (m)','Labels','Polybags','Stitch Yarn (kg)','Bags','Bora','Issued By','Timestamp'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+}
+function kittingFor_(item, rolls){
+  setupStore_();
+  const sh=getSS().getSheetByName(KITTING_SHEET); const d=sh.getDataRange().getValues();
+  const head=d[0].map(function(x){return String(x||'').trim().toLowerCase();}); const ci=function(n){return head.indexOf(n);};
+  let cfg=null;
+  for(let i=1;i<d.length;i++){ if(String(d[i][ci('quality')]||'').trim().toLowerCase()===String(item).trim().toLowerCase()){ cfg=d[i]; break; } }
+  const g=function(n){ return cfg?(Number(cfg[ci(n)])||0):0; };
+  const pcsPerRoll=g('pcs per roll')||0; const pcs=round(rolls*pcsPerRoll);
+  const ppBag=g('pcs per bag')||0, ppBora=g('pcs per bora')||0;
+  return {pcs:pcs,pcsPerRoll:pcsPerRoll,sattan:round(pcs*g('sattan per pc (m)')),labels:Math.round(pcs*g('labels per pc')),polybags:Math.round(pcs*g('polybags per pc')),yarnKg:round(pcs*g('stitch yarn per pc (g)')/1000),bags:(ppBag>0?Math.ceil(pcs/ppBag):0),bora:(ppBora>0?Math.ceil(pcs/ppBora):0),configured:!!cfg};
+}
+function stitchersList_(){
+  setupLots();
+  const sh=getSS().getSheetByName(LOTS_SHEET); const c=lotCols_(sh); const d=sh.getDataRange().getValues();
+  const set={}; ['Ravi','Sandeep'].forEach(function(n){set[n]=true;});
+  for(let i=1;i<d.length;i++){ const s=(c.stitch>=0?String(d[i][c.stitch]||'').trim():''); if(s) set[s]=true; }
+  return Object.keys(set).sort();
+}
+function issuedLots_(){
+  setupStore_();
+  const sh=getSS().getSheetByName(STORE_ISSUES_SHEET); const d=sh.getDataRange().getValues();
+  const head=d[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cLot=head.indexOf('lot id'),cTo=head.indexOf('issued to'),cDate=head.indexOf('date'),cId=head.indexOf('issue id');
+  const m={};
+  for(let i=1;i<d.length;i++){ const lot=String(d[i][cLot]||'').trim(); if(!lot) continue; m[lot]={issueId:d[i][cId],issuedTo:d[i][cTo],date:dateKey(d[i][cDate])}; }
+  return m;
+}
+function getStoreLots(user){
+  const u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.store) throw new Error('No store access.');
+  setupLots(); setupStore_();
+  const sh=getSS().getSheetByName(LOTS_SHEET); const c=lotCols_(sh); const d=sh.getDataRange().getValues();
+  const issued=issuedLots_(); const pending=[], done=[];
+  for(let i=1;i<d.length;i++){ const id=d[i][c.id]; if(!id) continue;
+    const item=String(d[i][c.item]||'').trim(); const rolls=Number(d[i][c.size])||0;
+    const k=kittingFor_(item,rolls); const stitch=(c.stitch>=0?String(d[i][c.stitch]||'').trim():'');
+    const rec={lotId:id,item:item,rolls:round(rolls),stitch:stitch,kit:k};
+    if(issued[id]){ rec.issuedTo=issued[id].issuedTo; rec.issuedDate=issued[id].date; done.push(rec); } else pending.push(rec);
+  }
+  pending.reverse(); done.reverse();
+  return {ok:true,pending:pending,issued:done.slice(0,40),stitchers:stitchersList_()};
+}
+function issueKitting(user, lotId, issuedTo){
+  const u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.store) throw new Error('No store access.');
+  setupLots(); setupStore_();
+  lotId=String(lotId||'').trim(); issuedTo=String(issuedTo||'').trim();
+  if(!lotId) return {ok:false,msg:'No lot'};
+  if(!issuedTo) return {ok:false,msg:'Select who to issue to'};
+  const f=findLotRow_(lotId); if(!f) return {ok:false,msg:'Lot not found'};
+  const iss=issuedLots_(); if(iss[lotId]) return {ok:false,msg:'Already issued to '+iss[lotId].issuedTo};
+  const item=String(f.data[f.c.item]||'').trim(); const rolls=Number(f.data[f.c.size])||0;
+  const k=kittingFor_(item,rolls);
+  const sh=getSS().getSheetByName(STORE_ISSUES_SHEET); const issueId='IS-'+pad4(Math.max(0,sh.getLastRow()-1)+1);
+  sh.appendRow([issueId,new Date(),lotId,item,round(rolls),k.pcs,issuedTo,k.sattan,k.labels,k.polybags,k.yarnKg,k.bags,k.bora,u.name,new Date()]);
+  logAudit_(u,'Store Issue',lotId+' → '+issuedTo);
+  return {ok:true,issueId:issueId};
+}
+
+/* ======================= INVENTORY / STORE (spare parts, trims, packing, chemicals) ======================= */
+const INV_ITEMS_SHEET='INV ITEMS';
+const INV_MOVES_SHEET='INV MOVES';
+const INV_CATEGORIES=['Spare Part','Trim','Packing','Chemical'];
+const INV_UNITS=['Pcs','Kg','Meter','Box','Ltr','Roll','Set'];
+function setupInventory_(){
+  if(_SETUP.inv) return; _SETUP.inv=true;
+  const ss=getSS();
+  if(!ss.getSheetByName(INV_ITEMS_SHEET)){
+    const s=ss.insertSheet(INV_ITEMS_SHEET);
+    const h=['Item Code','Name','Category','Type','Party','Unit','Min Stock','Location','Machine','Active','Created By','Created At'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+  if(!ss.getSheetByName(INV_MOVES_SHEET)){
+    const s=ss.insertSheet(INV_MOVES_SHEET);
+    const h=['Move ID','Date','Item Code','Name','Category','Party','Direction','Qty','Unit','Reference','To / From','By','Timestamp'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+  addColIfMissing_(ss.getSheetByName(INV_ITEMS_SHEET),'Type');
+}
+function _invCanStore(user){ const u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.store) throw new Error('No store access.'); return u; }
+function addInvItem(user,e){
+  const u=_invCanStore(user); setupInventory_();
+  const name=String(e.name||'').trim(); if(!name) return {ok:false,msg:'Enter item name'};
+  const cat=String(e.category||'').trim(); if(INV_CATEGORIES.indexOf(cat)<0) return {ok:false,msg:'Select category'};
+  const sh=getSS().getSheetByName(INV_ITEMS_SHEET); const c=colMapOf_(INV_ITEMS_SHEET); const data=sh.getDataRange().getValues();
+  const norm=function(s){return String(s||'').trim().toLowerCase().replace(/\s+/g,' ');};
+  for(let i=1;i<data.length;i++){ if(String(data[i][c['active']]||'Yes').toLowerCase()==='no') continue;
+    if(norm(data[i][c['name']])===norm(name) && norm(data[i][c['category']])===norm(cat)){ return {ok:false,msg:'Already exists: '+data[i][c['item code']]+' "'+data[i][c['name']]+'" — use that item.',existing:data[i][c['item code']]}; } }
+  const code='ITM-'+pad4(Math.max(0,sh.getLastRow()-1)+1);
+  const row=new Array(sh.getLastColumn()).fill('');
+  function setc(k,v){ if(c[k]!==undefined) row[c[k]]=v; }
+  setc('item code',code);setc('name',name);setc('category',cat);setc('type',String(e.type||'').trim());setc('party',String(e.party||'').trim());setc('unit',String(e.unit||'Pcs').trim());setc('min stock',round(e.minStock)||0);setc('location',String(e.location||'').trim());setc('machine',String(e.machine||'').trim());setc('active','Yes');setc('created by',u.name);setc('created at',new Date());
+  sh.appendRow(row);
+  logAudit_(u,'Inv Item Added',code+' '+name);
+  return {ok:true,code:code};
+}
+function invMove(user,e){
+  const u=_invCanStore(user); setupInventory_();
+  const code=String(e.itemCode||'').trim(); if(!code) return {ok:false,msg:'Select item'};
+  const dir=(String(e.direction||'').toUpperCase()==='OUT')?'OUT':'IN';
+  const qty=round(e.qty); if(!(qty>0)) return {ok:false,msg:'Enter qty'};
+  const itSh=getSS().getSheetByName(INV_ITEMS_SHEET); const c=colMapOf_(INV_ITEMS_SHEET); const id=itSh.getDataRange().getValues();
+  let item=null; for(let i=1;i<id.length;i++){ if(String(id[i][c['item code']]).trim()===code){ item={name:id[i][c['name']],cat:id[i][c['category']],party:id[i][c['party']],unit:id[i][c['unit']]}; break; } }
+  if(!item) return {ok:false,msg:'Item not found'};
+  const mv=getSS().getSheetByName(INV_MOVES_SHEET); const mc=colMapOf_(INV_MOVES_SHEET); const mid='MV-'+pad4(Math.max(0,mv.getLastRow()-1)+1);
+  const row=new Array(mv.getLastColumn()).fill('');
+  function setm(k,v){ if(mc[k]!==undefined) row[mc[k]]=v; }
+  setm('move id',mid);setm('date',new Date());setm('item code',code);setm('name',item.name);setm('category',item.cat);setm('party',item.party);setm('direction',dir);setm('qty',qty);setm('unit',item.unit);setm('reference',String(e.reference||'').trim());setm('to / from',String(e.toFrom||'').trim());setm('by',u.name);setm('timestamp',new Date());
+  mv.appendRow(row);
+  logAudit_(u,'Inv '+dir,code+' '+qty+' '+item.unit);
+  return {ok:true};
+}
+function getInvStock(user,opts){
+  _invCanStore(user); setupInventory_();
+  const itSh=getSS().getSheetByName(INV_ITEMS_SHEET); const c=colMapOf_(INV_ITEMS_SHEET); const id=itSh.getDataRange().getValues();
+  const mvSh=getSS().getSheetByName(INV_MOVES_SHEET); const mc=colMapOf_(INV_MOVES_SHEET); const md=mvSh.getDataRange().getValues();
+  const net={};
+  for(let i=1;i<md.length;i++){ const cc=String(md[i][mc['item code']]||'').trim(); if(!cc) continue; const q=Number(md[i][mc['qty']])||0; net[cc]=(net[cc]||0)+((String(md[i][mc['direction']]).toUpperCase()==='OUT')?-q:q); }
+  const items=[]; const parties={}, types={};
+  for(let i=1;i<id.length;i++){ const code=String(id[i][c['item code']]||'').trim(); if(!code) continue; if(String(id[i][c['active']]||'Yes').toLowerCase()==='no') continue;
+    const party=String(id[i][c['party']]||'').trim(); if(party) parties[party]=true;
+    const type=(c['type']!==undefined)?String(id[i][c['type']]||'').trim():''; if(type) types[type]=true;
+    const minS=Number(id[i][c['min stock']])||0; const stock=round(net[code]||0);
+    items.push({code:code,name:String(id[i][c['name']]||''),category:String(id[i][c['category']]||''),type:type,party:party,unit:String(id[i][c['unit']]||''),min:minS,location:String(id[i][c['location']]||''),machine:String(id[i][c['machine']]||''),stock:stock,low:(minS>0&&stock<=minS)});
+  }
+  items.sort(function(a,b){return String(a.name).localeCompare(String(b.name));});
+  return {ok:true,items:items,categories:INV_CATEGORIES,units:INV_UNITS,parties:Object.keys(parties).sort(),types:Object.keys(types).sort()};
+}
+function getInvItemMoves(user,code){
+  _invCanStore(user); setupInventory_();
+  const mvSh=getSS().getSheetByName(INV_MOVES_SHEET); const md=mvSh.getDataRange().getValues(); const mh=md[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  const cCode=mh.indexOf('item code'),cDate=mh.indexOf('date'),cDir=mh.indexOf('direction'),cQty=mh.indexOf('qty'),cRef=mh.indexOf('reference'),cTF=mh.indexOf('to / from'),cBy=mh.indexOf('by');
+  const out=[]; for(let i=md.length-1;i>=1 && out.length<25;i--){ if(String(md[i][cCode]||'').trim()!==String(code).trim()) continue; out.push({date:dateKey(md[i][cDate]),dir:md[i][cDir],qty:round(md[i][cQty]),ref:String(md[i][cRef]||''),toFrom:String(md[i][cTF]||''),by:String(md[i][cBy]||'')}); }
+  return {ok:true,moves:out};
+}
+
+/* ======================= BORE STOCK (Factory/Godown) + ONE-TIME OPENING ======================= */
+const BORE_STOCK_SHEET='BORE STOCK';
+const BORE_LOCATIONS=['Factory','Godown'];
+const OPENING_STAGES=['Raschel (Gray)','Slitting','Pre-finishing','Printing','Post-finishing','Packing'];
+function setupBoreStock_(){
+  if(_SETUP.borestock) return; _SETUP.borestock=true;
+  const ss=getSS();
+  if(!ss.getSheetByName(BORE_STOCK_SHEET)){
+    const s=ss.insertSheet(BORE_STOCK_SHEET);
+    const h=['Move ID','Date','Item','Location','Direction','Bore','Reference','By','Timestamp'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+}
+function boreMove_(item,location,dir,bore,ref,by){
+  setupBoreStock_();
+  const sh=getSS().getSheetByName(BORE_STOCK_SHEET); const id='BM-'+pad4(Math.max(0,sh.getLastRow()-1)+1);
+  sh.appendRow([id,new Date(),String(item||'').trim(),String(location||'').trim(),dir,round(bore),ref||'',by||'',new Date()]);
+  return id;
+}
+function _openLocked(){ return PropertiesService.getScriptProperties().getProperty('OPENING_LOCKED')==='yes'; }
+function _openingGuard(user){ if(!isAllAdmin_(user)) throw new Error('Only admin can set opening.'); if(_openLocked()) throw new Error('Opening already locked.'); }
+function openingRolls(user,dept,quality,rolls){
+  _openingGuard(user); const u=requireUser_(user);
+  dept=String(dept||'').trim(); quality=String(quality||'').trim(); rolls=round(rolls);
+  if(OPENING_STAGES.indexOf(dept)<0) return {ok:false,msg:'Pick stage'};
+  if(!quality) return {ok:false,msg:'Pick quality'};
+  if(!(rolls>0)) return {ok:false,msg:'Enter rolls'};
+  const w=ROLL_KG[quality]||0; const kg=round(rolls*w);
+  getSS().getSheetByName(SHEETS.LEDGER).appendRow([new Date(),dateKey(new Date()),dept,quality,0,0,rolls,kg,0,0,0,u.name,'Opening']);
+  logAudit_(u,'Opening Rolls',dept+' · '+quality+' · '+rolls);
+  return {ok:true};
+}
+function openingBore(user,item,location,bore){
+  _openingGuard(user); const u=requireUser_(user);
+  item=String(item||'').trim(); location=String(location||'').trim(); bore=round(bore);
+  if(!item) return {ok:false,msg:'Pick item'};
+  if(!location) return {ok:false,msg:'Pick contractor / location'};
+  if(!(bore>0)) return {ok:false,msg:'Enter bore'};
+  boreMove_(item,location,'IN',bore,'Opening',u.name);
+  try{ if(getContractorList_().indexOf(location)>=0) cledgerAdd_(location,item,'IN',bore,'Opening','Opening',u.name); }catch(e){}
+  logAudit_(u,'Opening Bore',item+' · '+location+' · '+bore);
+  return {ok:true};
+}
+function lockOpening(user){ if(!isAllAdmin_(user)) throw new Error('Only admin.'); PropertiesService.getScriptProperties().setProperty('OPENING_LOCKED','yes'); logAudit_(requireUser_(user),'Opening Locked',''); return {ok:true}; }
+function getOpeningData(user){
+  requireUser_(user); setupBoreStock_();
+  const led=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+  const rolls=[]; for(let i=1;i<led.length;i++){ if(String(led[i][12]||'').trim()==='Opening'){ rolls.push({dept:String(led[i][2]||''),quality:String(led[i][3]||''),rolls:round(led[i][6])}); } }
+  const bsh=getSS().getSheetByName(BORE_STOCK_SHEET).getDataRange().getValues();
+  const bore=[]; for(let i=1;i<bsh.length;i++){ if(String(bsh[i][6]||'').trim()==='Opening'){ bore.push({item:String(bsh[i][2]||''),location:String(bsh[i][3]||''),bore:round(bsh[i][5])}); } }
+  return {ok:true, locked:_openLocked(), admin:isAllAdmin_(user), stages:OPENING_STAGES, items:Object.keys(ROLL_KG), locations:BORE_LOCATIONS, rolls:rolls, bore:bore};
+}
+
+/* ======================= COSTING MODULE (Colours + Chemicals, stock + rate) ======================= */
+const COST_ITEMS_SHEET='COSTING ITEMS';
+const COST_MOVES_SHEET='COSTING MOVES';
+const COST_CATEGORIES=['Colour','Chemical'];
+const COST_UNITS=['Kg','Ltr','Gram'];
+function setupCosting_(){
+  if(_SETUP.costing) return; _SETUP.costing=true;
+  const ss=getSS();
+  if(!ss.getSheetByName(COST_ITEMS_SHEET)){
+    const s=ss.insertSheet(COST_ITEMS_SHEET);
+    const h=['Item Code','Name','Category','Supplier','Rate','Unit','Not In Use','Active','Created By','Created At'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+  if(!ss.getSheetByName(COST_MOVES_SHEET)){
+    const s=ss.insertSheet(COST_MOVES_SHEET);
+    const h=['Move ID','Date','Item Code','Name','Category','Supplier','Direction','Qty','Rate','Cost','Reference','By','Timestamp'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+}
+function _costCan(user){ const u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.costing) throw new Error('No costing access.'); return u; }
+function addCostItem(user,e){
+  const u=_costCan(user); setupCosting_();
+  const name=String(e.name||'').trim(); if(!name) return {ok:false,msg:'Enter name'};
+  const cat=String(e.category||'').trim(); if(COST_CATEGORIES.indexOf(cat)<0) return {ok:false,msg:'Pick Colour/Chemical'};
+  const sup=String(e.supplier||'').trim();
+  const sh=getSS().getSheetByName(COST_ITEMS_SHEET); const c=colMapOf_(COST_ITEMS_SHEET); const data=sh.getDataRange().getValues();
+  const norm=function(s){return String(s||'').trim().toLowerCase().replace(/\s+/g,' ');};
+  for(let i=1;i<data.length;i++){ if(String(data[i][c['active']]||'Yes').toLowerCase()==='no') continue;
+    if(norm(data[i][c['name']])===norm(name)&&norm(data[i][c['category']])===norm(cat)&&norm(data[i][c['supplier']])===norm(sup)) return {ok:false,msg:'Already exists: '+data[i][c['item code']]+' "'+data[i][c['name']]+'"'}; }
+  const code='C-'+pad4(Math.max(0,sh.getLastRow()-1)+1);
+  const row=new Array(sh.getLastColumn()).fill('');
+  function setc(k,v){ if(c[k]!==undefined) row[c[k]]=v; }
+  setc('item code',code);setc('name',name);setc('category',cat);setc('supplier',sup);setc('rate',round(e.rate));setc('unit',String(e.unit||'Kg').trim());setc('not in use',e.notInUse?'Yes':'No');setc('active','Yes');setc('created by',u.name);setc('created at',new Date());
+  sh.appendRow(row); logAudit_(u,'Costing Item',code+' '+name);
+  return {ok:true,code:code};
+}
+function setCostNotInUse(user,code,flag){ const u=_costCan(user); setupCosting_(); const sh=getSS().getSheetByName(COST_ITEMS_SHEET); const c=colMapOf_(COST_ITEMS_SHEET); const d=sh.getDataRange().getValues(); for(let i=1;i<d.length;i++){ if(String(d[i][c['item code']]).trim()===String(code).trim()){ sh.getRange(i+1,c['not in use']+1).setValue(flag?'Yes':'No'); logAudit_(u,'Costing NotInUse',code+'='+(flag?'Yes':'No')); return {ok:true}; } } return {ok:false,msg:'Not found'}; }
+function costMove(user,e){
+  const u=_costCan(user); setupCosting_();
+  const code=String(e.itemCode||'').trim(); if(!code) return {ok:false,msg:'Pick item'};
+  const dir=(String(e.direction||'').toUpperCase()==='OUT')?'OUT':'IN';
+  const qty=round(e.qty); if(!(qty>0)) return {ok:false,msg:'Enter qty'};
+  const itSh=getSS().getSheetByName(COST_ITEMS_SHEET); const c=colMapOf_(COST_ITEMS_SHEET); const id=itSh.getDataRange().getValues();
+  let item=null,rowI=-1; for(let i=1;i<id.length;i++){ if(String(id[i][c['item code']]).trim()===code){ item={name:id[i][c['name']],cat:id[i][c['category']],sup:id[i][c['supplier']],rate:Number(id[i][c['rate']])||0}; rowI=i; break; } }
+  if(!item) return {ok:false,msg:'Item not found'};
+  let rate=item.rate; if(e.rate!==undefined&&String(e.rate)!==''){ rate=round(e.rate); if(rate!==item.rate) itSh.getRange(rowI+1,c['rate']+1).setValue(rate); }
+  const cost=round(qty*rate);
+  const mv=getSS().getSheetByName(COST_MOVES_SHEET); const mc=colMapOf_(COST_MOVES_SHEET); const mid='CM-'+pad4(Math.max(0,mv.getLastRow()-1)+1);
+  const dt=e.date?new Date(e.date):new Date();
+  const row=new Array(mv.getLastColumn()).fill('');
+  function setm(k,v){ if(mc[k]!==undefined) row[mc[k]]=v; }
+  setm('move id',mid);setm('date',dt);setm('item code',code);setm('name',item.name);setm('category',item.cat);setm('supplier',item.sup);setm('direction',dir);setm('qty',qty);setm('rate',rate);setm('cost',cost);setm('reference',String(e.reference||'').trim());setm('by',u.name);setm('timestamp',new Date());
+  mv.appendRow(row); logAudit_(u,'Costing '+dir,code+' '+qty+' @'+rate);
+  return {ok:true};
+}
+function getCosting(user){
+  _costCan(user); setupCosting_();
+  const du=_dailyUseMap_();
+  const itSh=getSS().getSheetByName(COST_ITEMS_SHEET); const c=colMapOf_(COST_ITEMS_SHEET); const id=itSh.getDataRange().getValues();
+  const mvSh=getSS().getSheetByName(COST_MOVES_SHEET); const mc=colMapOf_(COST_MOVES_SHEET); const md=mvSh.getDataRange().getValues();
+  const net={}; for(let i=1;i<md.length;i++){ const cc=String(md[i][mc['item code']]||'').trim(); if(!cc) continue; const q=Number(md[i][mc['qty']])||0; net[cc]=(net[cc]||0)+((String(md[i][mc['direction']]).toUpperCase()==='OUT')?-q:q); }
+  const items=[]; const suppliers={};
+  for(let i=1;i<id.length;i++){ const code=String(id[i][c['item code']]||'').trim(); if(!code) continue; if(String(id[i][c['active']]||'Yes').toLowerCase()==='no') continue;
+    const sup=String(id[i][c['supplier']]||'').trim(); if(sup) suppliers[sup]=true;
+    const rate=Number(id[i][c['rate']])||0; const bal=round((net[code]||0)-(du[code]||0));
+    items.push({code:code,name:String(id[i][c['name']]||''),category:String(id[i][c['category']]||''),supplier:sup,rate:rate,unit:String(id[i][c['unit']]||''),notInUse:(String(id[i][c['not in use']]||'').toLowerCase()==='yes'),balance:bal,value:round(bal*rate)});
+  }
+  items.sort(function(a,b){return String(a.name).localeCompare(String(b.name));});
+  return {ok:true,items:items,categories:COST_CATEGORIES,units:COST_UNITS,suppliers:Object.keys(suppliers).sort()};
+}
+function getCostItemMoves(user,code){ _costCan(user); setupCosting_(); const mvSh=getSS().getSheetByName(COST_MOVES_SHEET); const mc=colMapOf_(COST_MOVES_SHEET); const md=mvSh.getDataRange().getValues(); const out=[]; for(let i=md.length-1;i>=1&&out.length<25;i--){ if(String(md[i][mc['item code']]||'').trim()!==String(code).trim()) continue; out.push({date:dateKey(md[i][mc['date']]),dir:String(md[i][mc['direction']]||''),qty:round(md[i][mc['qty']]),rate:round(md[i][mc['rate']]),cost:round(md[i][mc['cost']]),ref:String(md[i][mc['reference']]||''),by:String(md[i][mc['by']]||'')}); } return {ok:true,moves:out}; }
+
+function getChemAlerts(user){
+  var u; try{ u=_costCan(user); }catch(e){ return {ok:true,overuse:[],lowstock:[]}; }
+  setupCosting_(); setupCostingDaily_();
+  var du=_dailyUseMap_();
+  var itSh=getSS().getSheetByName(COST_ITEMS_SHEET), c=colMapOf_(COST_ITEMS_SHEET), id=itSh.getDataRange().getValues();
+  var mvSh=getSS().getSheetByName(COST_MOVES_SHEET), mc=colMapOf_(COST_MOVES_SHEET), md=mvSh.getDataRange().getValues();
+  var net={}; for(var i=1;i<md.length;i++){ var cc=String(md[i][mc['item code']]||'').trim(); if(!cc) continue; var q=Number(md[i][mc['qty']])||0; net[cc]=(net[cc]||0)+((String(md[i][mc['direction']]).toUpperCase()==='OUT')?-q:q); }
+  var lowstock=[];
+  for(var i2=1;i2<id.length;i2++){ var code=String(id[i2][c['item code']]||'').trim(); if(!code) continue; if(String(id[i2][c['active']]||'Yes').toLowerCase()==='no') continue; var cat=String(id[i2][c['category']]||'').toLowerCase(); if(cat.indexOf('chem')<0) continue; var name=String(id[i2][c['name']]||''); var bal=round((net[code]||0)-(du[code]||0)); if(bal<=50) lowstock.push({name:name,balance:bal}); }
+  lowstock.sort(function(a,b){return a.balance-b.balance;});
+  var dSh=getSS().getSheetByName(COSTING_DAILY_SHEET), dc=colMapOf_(COSTING_DAILY_SHEET), dd=dSh.getDataRange().getValues();
+  var rollsByDate={}; for(var i3=1;i3<dd.length;i3++){ var dt=dateKey(dd[i3][dc['date']]); if(!dt) continue; rollsByDate[dt]=Number(dd[i3][dc['rolls']])||0; }
+  var useSh=getSS().getSheetByName(COSTING_USE_SHEET), uc=colMapOf_(COSTING_USE_SHEET), ud=useSh.getDataRange().getValues();
+  var byChem={};
+  for(var i4=1;i4<ud.length;i4++){ var cat2=String(ud[i4][uc['category']]||'').toLowerCase(); if(cat2.indexOf('chem')<0) continue; var nm=String(ud[i4][uc['name']]||'').trim(); if(!nm) continue; var dt2=dateKey(ud[i4][uc['date']]); var use=Number(ud[i4][uc['use']])||0; if(use<=0) continue; byChem[nm]=byChem[nm]||{}; byChem[nm][dt2]=(byChem[nm][dt2]||0)+use; }
+  var overuse=[], TH=1.2;
+  Object.keys(byChem).forEach(function(nm){ var dates=Object.keys(byChem[nm]).filter(function(d){return rollsByDate[d]>0;}).sort(); if(dates.length<2) return; var dLast=dates[dates.length-1], dPrev=dates[dates.length-2]; var pLast=byChem[nm][dLast]/rollsByDate[dLast], pPrev=byChem[nm][dPrev]/rollsByDate[dPrev]; if(pPrev>0 && pLast>pPrev*TH){ overuse.push({name:nm,today:round(byChem[nm][dLast]),todayRolls:rollsByDate[dLast],todayPerRoll:round(pLast),prev:round(byChem[nm][dPrev]),prevRolls:rollsByDate[dPrev],prevPerRoll:round(pPrev),date:dLast}); } });
+  overuse.sort(function(a,b){return (b.todayPerRoll-b.prevPerRoll)-(a.todayPerRoll-a.prevPerRoll);});
+  return {ok:true,overuse:overuse,lowstock:lowstock};
+}
+
+/* ======================= COSTING — DAILY SHEET (editable grid + cost/kg) ======================= */
+const COSTING_DAILY_SHEET='COSTING DAILY';
+const COSTING_USE_SHEET='COSTING DAILY USE';
+function setupCostingDaily_(){
+  if(_SETUP.costingdaily) return; _SETUP.costingdaily=true;
+  const ss=getSS();
+  if(!ss.getSheetByName(COSTING_DAILY_SHEET)){ const s=ss.insertSheet(COSTING_DAILY_SHEET); const h=['Date','Rolls','Weight','Extra Washing','Raschel Salary','Raschel Electricity','Finishing Salary','Finishing Electricity','Finishing Gas','Printing','AWH','Stitching','Embossing Pcs','Raschel Kg','Prefin Kg','Wastage Kg','Colour Costing','Chemical Costing','Total Per Kg','By','Timestamp']; s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1); }
+  else { const s=ss.getSheetByName(COSTING_DAILY_SHEET); ['Embossing Pcs','Raschel Kg','Prefin Kg','Wastage Kg'].forEach(function(cn){ try{ addColIfMissing_(s,cn); }catch(e){} }); }
+  if(!ss.getSheetByName(COSTING_USE_SHEET)){ const s=ss.insertSheet(COSTING_USE_SHEET); const h=['Date','Item Code','Name','Category','Supplier','Use','Rate','Cost','By','Timestamp']; s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1); }
+}
+function _dailyUseMap_(){ setupCostingDaily_(); const sh=getSS().getSheetByName(COSTING_USE_SHEET); const d=sh.getDataRange().getValues(); const c=colMapOf_(COSTING_USE_SHEET); const m={}; for(let i=1;i<d.length;i++){ const code=String(d[i][c['item code']]||'').trim(); if(!code) continue; m[code]=(m[code]||0)+(Number(d[i][c['use']])||0); } return m; }
+function _dStr_(s){ return new Date(String(s)+'T12:00:00'); }
+function _costDeptKg_(dateStr){
+  const led=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+  let raschel=0,prefin=0,wastage=0;
+  for(let i=1;i<led.length;i++){ if(dateKey(led[i][1])!==dateStr) continue;
+    const dept=String(led[i][2]||''); const rK=Number(led[i][5])||0; const wst=Number(led[i][8])||0;
+    if(dept==='Raschel (Gray)') raschel+=rK;
+    if(dept==='Pre-finishing') prefin+=rK;
+    wastage+=wst;
+  }
+  return {raschelKg:round(raschel), prefinKg:round(prefin), wastageKg:round(wastage)};
+}
+function _costPerKg_(h, colCost, chemCost, dk){
+  const weight=Number(h.weight)||0;
+  const raschelOH=(Number(h.rSalary)||0)+(Number(h.rElec)||0);
+  const finishingOH=(Number(h.fSalary)||0)+(Number(h.fElec)||0)+(Number(h.fGas)||0);
+  const embAmt=(Number(h.embossingPcs)||0)*1.5;
+  const wastageAmt=(Number(dk.wastageKg)||0)*200;
+  const rPerKg = dk.raschelKg>0 ? (raschelOH+embAmt+wastageAmt)/dk.raschelKg : 0;
+  const fPerKg = dk.prefinKg>0 ? finishingOH/dk.prefinKg : 0;
+  const fixedPerKg = (Number(h.printing)||0)+(Number(h.awh)||0)+(Number(h.stitching)||0)+(Number(h.extraWashing)||0);
+  const colPerKg = weight>0 ? colCost/weight : 0;
+  const chPerKg = weight>0 ? chemCost/weight : 0;
+  return { perKg:round(rPerKg+fPerKg+fixedPerKg+colPerKg+chPerKg),
+    raschelPerKg:round(rPerKg), finishingPerKg:round(fPerKg), fixedPerKg:round(fixedPerKg),
+    colourPerKg:round(colPerKg), chemPerKg:round(chPerKg), embAmt:round(embAmt), wastageAmt:round(wastageAmt) };
+}
+function _costAverages_(dateStr){
+  setupCostingDaily_(); const dSh=getSS().getSheetByName(COSTING_DAILY_SHEET); const dc=colMapOf_(COSTING_DAILY_SHEET); const dd=dSh.getDataRange().getValues();
+  const mo=String(dateStr).slice(0,7), yr=String(dateStr).slice(0,4);
+  let mCost=0,mKg=0,yCost=0,yKg=0;
+  for(let i=1;i<dd.length;i++){ const dk=dateKey(dd[i][dc['date']]); if(!dk)continue;
+    const w=Number(dd[i][dc['weight']])||0; const pk=Number(dd[i][dc['total per kg']])||0; const c=pk*w;
+    if(String(dk).slice(0,7)===mo){ mCost+=c; mKg+=w; }
+    if(String(dk).slice(0,4)===yr){ yCost+=c; yKg+=w; }
+  }
+  return { month: mKg>0?round(mCost/mKg):0, year: yKg>0?round(yCost/yKg):0 };
+}
+function getCostingSheet(user,dateStr){
+  _costCan(user); setupCosting_(); setupCostingDaily_();
+  dateStr=String(dateStr||dateKey(new Date()));
+  const itSh=getSS().getSheetByName(COST_ITEMS_SHEET); const ic=colMapOf_(COST_ITEMS_SHEET); const id=itSh.getDataRange().getValues();
+  const mvSh=getSS().getSheetByName(COST_MOVES_SHEET); const mc=colMapOf_(COST_MOVES_SHEET); const md=mvSh.getDataRange().getValues();
+  const netMoves={}; for(let i=1;i<md.length;i++){ const code=String(md[i][mc['item code']]||'').trim(); if(!code)continue; const q=Number(md[i][mc['qty']])||0; netMoves[code]=(netMoves[code]||0)+((String(md[i][mc['direction']]).toUpperCase()==='OUT')?-q:q); }
+  const useSh=getSS().getSheetByName(COSTING_USE_SHEET); const uc=colMapOf_(COSTING_USE_SHEET); const ud=useSh.getDataRange().getValues();
+  const totalUse={}, todayUse={};
+  for(let i=1;i<ud.length;i++){ const code=String(ud[i][uc['item code']]||'').trim(); if(!code)continue; const u=Number(ud[i][uc['use']])||0; totalUse[code]=(totalUse[code]||0)+u; if(dateKey(ud[i][uc['date']])===dateStr) todayUse[code]=(todayUse[code]||0)+u; }
+  const items=[]; const suppliers={};
+  for(let i=1;i<id.length;i++){ const code=String(id[i][ic['item code']]||'').trim(); if(!code)continue; if(String(id[i][ic['active']]||'Yes').toLowerCase()==='no')continue;
+    const sup=String(id[i][ic['supplier']]||'').trim(); const cat=String(id[i][ic['category']]||''); const rate=Number(id[i][ic['rate']])||0;
+    const balAll=round((netMoves[code]||0)-(totalUse[code]||0)); const tUse=round(todayUse[code]||0); const qty=round(balAll+tUse);
+    if(sup) suppliers[sup]=true;
+    items.push({code:code,name:String(id[i][ic['name']]||''),category:cat,supplier:sup,rate:rate,unit:String(id[i][ic['unit']]||''),notInUse:(String(id[i][ic['not in use']]||'').toLowerCase()==='yes'),qty:qty,use:tUse,bal:balAll});
+  }
+  items.sort(function(a,b){return String(a.name).localeCompare(String(b.name));});
+  const dSh=getSS().getSheetByName(COSTING_DAILY_SHEET); const dc=colMapOf_(COSTING_DAILY_SHEET); const dd=dSh.getDataRange().getValues();
+  let hdr=null; for(let i=1;i<dd.length;i++){ if(dateKey(dd[i][dc['date']])===dateStr){ hdr={rolls:Number(dd[i][dc['rolls']])||0,weight:Number(dd[i][dc['weight']])||0,extraWashing:Number(dd[i][dc['extra washing']])||0,rSalary:Number(dd[i][dc['raschel salary']])||0,rElec:Number(dd[i][dc['raschel electricity']])||0,fSalary:Number(dd[i][dc['finishing salary']])||0,fElec:Number(dd[i][dc['finishing electricity']])||0,fGas:Number(dd[i][dc['finishing gas']])||0,printing:Number(dd[i][dc['printing']])||0,awh:Number(dd[i][dc['awh']])||0,stitching:Number(dd[i][dc['stitching']])||0,embossingPcs:(dc['embossing pcs']!==undefined?Number(dd[i][dc['embossing pcs']])||0:0)}; break; } }
+  return {ok:true, date:dateStr, items:items, suppliers:Object.keys(suppliers).sort(), header:hdr, deptKg:_costDeptKg_(dateStr), averages:_costAverages_(dateStr)};
+}
+function saveDailyCosting(user,dateStr,lines,header){
+  const u=_costCan(user); setupCosting_(); setupCostingDaily_();
+  dateStr=String(dateStr||dateKey(new Date())); lines=lines||[]; header=header||{};
+  const itSh=getSS().getSheetByName(COST_ITEMS_SHEET); const ic=colMapOf_(COST_ITEMS_SHEET); const id=itSh.getDataRange().getValues();
+  const items={}; for(let i=1;i<id.length;i++){ const code=String(id[i][ic['item code']]||'').trim(); if(!code)continue; items[code]={name:String(id[i][ic['name']]||''),cat:String(id[i][ic['category']]||''),sup:String(id[i][ic['supplier']]||''),rate:Number(id[i][ic['rate']])||0,row:i+1}; }
+  const useSh=getSS().getSheetByName(COSTING_USE_SHEET); const uc=colMapOf_(COSTING_USE_SHEET); const ud=useSh.getDataRange().getValues();
+  const rowOf={}; for(let i=1;i<ud.length;i++){ if(dateKey(ud[i][uc['date']])===dateStr){ const code=String(ud[i][uc['item code']]||'').trim(); if(code) rowOf[code]=i+1; } }
+  let colCost=0, chemCost=0; const appends=[];
+  lines.forEach(function(ln){ const code=String(ln.code||'').trim(); const it=items[code]; if(!it) return; const use=round(ln.use);
+    let rate=it.rate; if(ln.rate!==undefined&&String(ln.rate)!==''){ rate=round(ln.rate); if(rate!==it.rate) itSh.getRange(it.row,ic['rate']+1).setValue(rate); }
+    const cost=round(use*rate);
+    if(it.cat==='Colour') colCost+=cost; else if(it.cat==='Chemical') chemCost+=cost;
+    if(rowOf[code]){ const r=rowOf[code]; useSh.getRange(r,uc['use']+1).setValue(use); useSh.getRange(r,uc['rate']+1).setValue(rate); useSh.getRange(r,uc['cost']+1).setValue(cost); }
+    else if(use>0){ const row=new Array(useSh.getLastColumn()).fill(''); function s(k,v){if(uc[k]!==undefined)row[uc[k]]=v;} s('date',_dStr_(dateStr));s('item code',code);s('name',it.name);s('category',it.cat);s('supplier',it.sup);s('use',use);s('rate',rate);s('cost',cost);s('by',u.name);s('timestamp',new Date()); appends.push(row); }
+  });
+  if(appends.length) useSh.getRange(useSh.getLastRow()+1,1,appends.length,useSh.getLastColumn()).setValues(appends);
+  colCost=round(colCost); chemCost=round(chemCost);
+  const dk=_costDeptKg_(dateStr);
+  const calc=_costPerKg_(header, colCost, chemCost, dk);
+  const perKg=calc.perKg;
+  const dSh=getSS().getSheetByName(COSTING_DAILY_SHEET); const dc=colMapOf_(COSTING_DAILY_SHEET); const dd=dSh.getDataRange().getValues();
+  let hrow=-1; for(let i=1;i<dd.length;i++){ if(dateKey(dd[i][dc['date']])===dateStr){ hrow=i+1; break; } }
+  const ha=new Array(dSh.getLastColumn()).fill(''); function hs(k,v){if(dc[k]!==undefined)ha[dc[k]]=v;}
+  hs('date',_dStr_(dateStr));hs('rolls',Number(header.rolls)||0);hs('weight',Number(header.weight)||0);hs('extra washing',Number(header.extraWashing)||0);hs('raschel salary',Number(header.rSalary)||0);hs('raschel electricity',Number(header.rElec)||0);hs('finishing salary',Number(header.fSalary)||0);hs('finishing electricity',Number(header.fElec)||0);hs('finishing gas',Number(header.fGas)||0);hs('printing',Number(header.printing)||0);hs('awh',Number(header.awh)||0);hs('stitching',Number(header.stitching)||0);hs('embossing pcs',Number(header.embossingPcs)||0);hs('raschel kg',dk.raschelKg);hs('prefin kg',dk.prefinKg);hs('wastage kg',dk.wastageKg);hs('colour costing',colCost);hs('chemical costing',chemCost);hs('total per kg',perKg);hs('by',u.name);hs('timestamp',new Date());
+  if(hrow>0) dSh.getRange(hrow,1,1,ha.length).setValues([ha]); else dSh.appendRow(ha);
+  logAudit_(u,'Daily Costing',dateStr+' /kg '+perKg);
+  return {ok:true, colourCosting:colCost, chemicalCosting:chemCost, perKg:perKg, deptKg:dk, breakdown:calc, averages:_costAverages_(dateStr)};
+}
+
+function bulkAddCostItems(user,text){
+  const u=_costCan(user); setupCosting_();
+  const lines=String(text||'').split(/\r?\n/); let added=0,skipped=0;
+  for(let i=0;i<lines.length;i++){ const ln=lines[i].trim(); if(!ln) continue;
+    const p=ln.split(/\t|,|\|/).map(function(x){return x.trim();});
+    const name=p[0]||''; if(!name) continue;
+    let cat=(p[1]||'').toLowerCase().indexOf('chem')>=0?'Chemical':'Colour';
+    const r=addCostItem(u.name,{name:name,category:cat,supplier:(p[2]||''),rate:(p[3]||0)});
+    if(r&&r.ok) added++; else skipped++;
+  }
+  return {ok:true,added:added,skipped:skipped};
+}
+
+/* ======================= GO-LIVE RESET — clear all mock entries (keeps USERS + config masters) ======================= */
+function _goLiveClearList_(){
+  // Transactional / entry sheets to WIPE (data rows; header kept). Item masters included so fresh data loads clean.
+  return ['LEDGER','WIP','REPAIR','AUDIT LOG','ORDERS','PACKING','PACKING LISTS','DISPATCHES',
+    'LOTS','LOT MOVES','WARPING','KNITTING','INWARD','PAYMENTS','KITTING','STORE ISSUES',
+    'INV MOVES','BORE STOCK','COSTING MOVES','COSTING DAILY','COSTING DAILY USE',
+    'QC SESSIONS','QC PIECES','PO LOG','CONTRACTOR LEDGER','COSTING ITEMS','INV ITEMS'];
+}
+function goLiveReset(user, confirm){
+  if(!isAllAdmin_(user)) throw new Error('Only an admin can reset.');
+  if(String(confirm||'').trim().toUpperCase()!=='RESET') return {ok:false,msg:'Type RESET to confirm.'};
+  const ss=getSS(); const cleared=[];
+  _goLiveClearList_().forEach(function(nm){
+    const sh=ss.getSheetByName(nm); if(!sh) return;
+    const last=sh.getLastRow();
+    if(last>1){ sh.deleteRows(2, last-1); cleared.push(nm+' ('+(last-1)+' rows)'); }
+    else { cleared.push(nm+' (already empty)'); }
+  });
+  PropertiesService.getScriptProperties().setProperty('OPENING_LOCKED','no');
+  try{ logAudit_(requireUser_(user),'GO-LIVE RESET — entries cleared', cleared.join('; ')); }catch(e){}
+  return {ok:true, cleared:cleared, kept:['USERS (logins)','MACHINES','RATES','QC CONTRACTORS','QC COLUMNS','DESIGNS']};
+}
+/* Run this ONCE from the Apps Script editor (Run button) to wipe all mock entries before going live.
+   Keeps USERS (logins) + config masters. Make sure the BACKUP copy exists first! */
+function RESET_GO_LIVE(){
+  const ss=getSS(); const cleared=[];
+  _goLiveClearList_().forEach(function(nm){
+    const sh=ss.getSheetByName(nm); if(!sh) return;
+    const last=sh.getLastRow();
+    if(last>1){ sh.deleteRows(2, last-1); cleared.push(nm+': '+(last-1)+' rows cleared'); }
+  });
+  PropertiesService.getScriptProperties().setProperty('OPENING_LOCKED','no');
+  Logger.log('GO-LIVE RESET done.\nCleared:\n'+cleared.join('\n')+'\n\nKEPT: USERS, MACHINES, RATES, QC CONTRACTORS, QC COLUMNS, DESIGNS');
+  return cleared;
+}
+
+/* ======================= OUTWARD / GATE — packing list + wastage challan (guard, mandatory weight photo) ======================= */
+const OUTWARD_SHEET='OUTWARD';
+function setupOutward_(){
+  const ss=getSS(); let sh=ss.getSheetByName(OUTWARD_SHEET);
+  if(!sh){ sh=ss.insertSheet(OUTWARD_SHEET);
+    sh.appendRow(['Outward ID','Type','Ref ID','Party','Description','Qty','Weight (kg)','Rate','Status','Gate Photo','Gate By','Gate Out Time','Challan URL','Created','Created By']);
+    sh.setFrozenRows(1);
+  } else { try{ addColIfMissing_(sh,'Rate'); }catch(e){} }
+}
+function _outCan(user){ const u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.security&&!u.can.inward) throw new Error('No gate/outward access.'); return u; }
+function outwardAddPacking_(dispatchId, party, bags, weight, url, by){
+  try{ setupOutward_(); getSS().getSheetByName(OUTWARD_SHEET).appendRow(['OUT-'+dispatchId,'Packing',dispatchId,party,bags+' Bora',bags,round(weight),'Pending','','','',url||'',new Date(),by||'']); }catch(e){}
+}
+function createWastageChallan(user, e){
+  const u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.contractor_balance&&!u.can.purchase&&!u.can.order_entry) throw new Error('No permission to create challan.');
+  setupOutward_(); e=e||{};
+  const buyer=String(e.buyer||'').trim(); if(!buyer) return {ok:false,msg:'Buyer name required'};
+  const desc=String(e.description||'').trim(); const kg=round(Number(e.kg)||0); const wt=round(Number(e.weight)||0); const rate=round(Number(e.rate)||0);
+  const id='CH-'+Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'yyMMdd-HHmmss');
+  const challanUrl=makeOutwardChallan_({id:id,party:buyer,desc:desc,qty:kg,weight:wt,rate:rate,time:new Date()});
+  const sh=getSS().getSheetByName(OUTWARD_SHEET); const c=colMapOf_(OUTWARD_SHEET); const arr=new Array(sh.getLastColumn()).fill('');
+  arr[c['outward id']]=id; arr[c['type']]='Challan'; arr[c['ref id']]=id; arr[c['party']]=buyer; arr[c['description']]=desc; arr[c['qty']]=kg; arr[c['weight (kg)']]=wt; if(c['rate']!==undefined)arr[c['rate']]=rate; arr[c['status']]='Pending'; arr[c['challan url']]=challanUrl; arr[c['created']]=new Date(); arr[c['created by']]=u.name;
+  sh.appendRow(arr);
+  logAudit_(u,'Challan created',id+' / '+buyer+' / '+wt+'kg');
+  return {ok:true,id:id,challan:challanUrl};
+}
+function getOutward(user){
+  const u=_outCan(user); setupOutward_();
+  const sh=getSS().getSheetByName(OUTWARD_SHEET); const c=colMapOf_(OUTWARD_SHEET); const d=sh.getDataRange().getValues();
+  const pending=[],recent=[];
+  for(let i=1;i<d.length;i++){ const r={ id:d[i][c['outward id']], type:d[i][c['type']], ref:d[i][c['ref id']], party:d[i][c['party']], desc:d[i][c['description']], qty:d[i][c['qty']], weight:round(Number(d[i][c['weight (kg)']])||0), rate:(c['rate']!==undefined?round(Number(d[i][c['rate']])||0):0), status:d[i][c['status']], photo:d[i][c['gate photo']], gateBy:d[i][c['gate by']], outTime:d[i][c['gate out time']]?Utilities.formatDate(new Date(d[i][c['gate out time']]),Session.getScriptTimeZone(),'dd-MMM HH:mm'):'', challan:d[i][c['challan url']] };
+    if(String(r.status).toLowerCase()!=='out') pending.push(r); else recent.push(r); }
+  recent.reverse(); return {pending:pending, recent:recent.slice(0,25)};
+}
+function outwardOk(user, outwardId, photoData){
+  const u=_outCan(user); if(!photoData) return {ok:false,msg:'Kaante ki photo zaroori hai (mandatory).'};
+  setupOutward_(); const sh=getSS().getSheetByName(OUTWARD_SHEET); const c=colMapOf_(OUTWARD_SHEET); const d=sh.getDataRange().getValues();
+  for(let i=1;i<d.length;i++){ if(String(d[i][c['outward id']])===String(outwardId)){
+    if(String(d[i][c['status']]).toLowerCase()==='out') return {ok:false,msg:'Already out.'};
+    const photoUrl=savePhotoTo_(photoData, outwardId+'_gate.jpg','Romero Gate Photos'); const now=new Date();
+    let challanUrl=d[i][c['challan url']];
+    if(!challanUrl){ challanUrl=makeOutwardChallan_({id:outwardId,type:d[i][c['type']],party:d[i][c['party']],desc:d[i][c['description']],qty:d[i][c['qty']],weight:d[i][c['weight (kg)']],rate:(c['rate']!==undefined?d[i][c['rate']]:0),gateBy:u.name,photo:photoUrl,time:now}); }
+    sh.getRange(i+1,c['status']+1).setValue('Out'); sh.getRange(i+1,c['gate photo']+1).setValue(photoUrl);
+    sh.getRange(i+1,c['gate by']+1).setValue(u.name); sh.getRange(i+1,c['gate out time']+1).setValue(now);
+    sh.getRange(i+1,c['challan url']+1).setValue(challanUrl);
+    logAudit_(u,'Gate OUT',outwardId+' / '+d[i][c['party']]);
+    return {ok:true, time:Utilities.formatDate(now,Session.getScriptTimeZone(),'dd-MMM-yyyy HH:mm'), challan:challanUrl};
+  }}
+  return {ok:false,msg:'Not found'};
+}
+function makeOutwardChallan_(r){
+  const now=Utilities.formatDate(r.time||new Date(),Session.getScriptTimeZone(),'dd-MMM-yyyy HH:mm');
+  const ttl=(r.type==='Packing')?'GATE PASS — OUTWARD':'CHALLAN';
+  const rate=Number(r.rate)||0, wt=Number(r.weight)||0, amt=rate>0?round(rate*wt):0;
+  const html='<div style="font-family:Arial;padding:28px;color:#111;"><div style="text-align:center;border-bottom:3px solid #0f2942;padding-bottom:10px;"><div style="font-size:22px;font-weight:bold;letter-spacing:1px;">ROMERO HOME PVT. LTD.</div></div><div style="text-align:center;margin:14px 0;font-size:16px;font-weight:bold;color:#0f2942;">'+ttl+'</div><table style="width:100%;font-size:14px;border-collapse:collapse;">'+row_('Challan No',r.id)+row_('Date &amp; Time',now)+row_('Buyer / Party',r.party)+(r.desc?row_('Description',r.desc):'')+row_('Qty',r.qty)+row_('Weight (kg)',r.weight)+(rate>0?row_('Rate (Rs/kg)',rate):'')+(amt>0?row_('Amount (Rs)',amt):'')+(r.gateBy?row_('Gate (Guard)',r.gateBy):'')+(r.photo?row_('Weight Photo',r.photo):'')+'</table><div style="margin-top:50px;display:flex;justify-content:space-between;font-size:13px;"><div>______________________<br>Guard</div><div>______________________<br>Authorised Sign</div></div></div>';
+  const pdf=Utilities.newBlob(html,'text/html','c.html').getAs('application/pdf'); pdf.setName('Challan_'+r.id+'.pdf');
+  const file=getFolder_('Romero Challans').createFile(pdf); file.setSharing(DriveApp.Access.ANYONE_WITH_LINK,DriveApp.Permission.VIEW); return file.getUrl();
+}
+
+/* ======================= SEED COSTING ITEMS — load all 76 colours/chemicals + rates (run once from editor) ======================= */
+function seedCostingItems(user){ if(!isAllAdmin_(user)) throw new Error('Only admin can load default items.'); return SEED_COSTING_ITEMS(); }
+function SEED_COSTING_ITEMS(){
+  setupCosting_();
+  var admin='ANKIT';
+  var colSun=[['BROWN 3REL',205],['BROWN 3BS',260],['BROWN 3RSF',445],['YELLOW BR. 2RFL',188],['GOLD YELLOW 2GD',367],['RED RGL',276],['RED F3BL',2336],['RED 2B',220],['RED VIOLET FBL',1028],['RED F3BS',1024],['NEAVY BLUE 3G',279],['BLUE DBR',556],['BLUE GSL',1038],['BLUE BG',755],['BLUE 2RX',802],['SCARLET 3R',217],['SCARLET RR',180],['YELLOW SG',638],['YELLOW 10GN',1132],['YELLOW C4G',476],['BLACK RLS',315],['GREY BRS',228],['PINK RBSF',526],['RUBINE S2GFLW',241],['RUBINE 2BN',273],['RUBINE 5B',246],['ORANGE FCR',845],['ORANGE 3R',248],['VIOLET 3R',485],['BLUE BRSL',450],['KHAKHI 2RBS',179],['RED BF',839],['YELLOW 5R',170]];
+  var colAdpl=[['BROWN 3RSF',433],['BROWN 3BS',260],['BROWN 3REL',180],['RED 2B',220],['RED F3BS',954],['RUBINE S2GFLW',242],['PINK RBSF',526],['BLUE DBR',556],['NEAVY BLUE 3G',250],['BLACK RLS',315],['SCARLET RR',158],['VIOLET 3R',426],['YELLOW BR. 2RFL',182],['RED J',1140]];
+  var chem=[['HYDRO',156],['CASTIC',65.5],['ACID',56],['SOAP',77],['SILICON (X1000)',370],['FLEX CATONIC',320],['CLD PLUS',162],['TUBINGAL 7023',140],['P50 (SILICON)',380],['SILI (Z 1000)',320],['TUBINGAL SHU 278',275],['TUBINGAL 6595 (CATONIC)',450],['TUBINGAL SHU 413',275],['GREEN ACID',46],['HCL',8],['SILI (V 4400)',285],['SILI (TRANSOFT 4916)',390]];
+  var printing=[['GUM',108],['CITRIC ACID',19],['KBI',150],['TRANVICOSE 316 TKNR',99],['TRANSPRINT 312',210],['TKNR (CX7)',220],['THICKNOL TKNR (ADPL)',195],['INCOTEX GEAR GUM',160],['B.R TKNR',262],['W.S POWDER',145],['R.C',125],['DFT',120]];
+  var added=0,skipped=0;
+  var all=[];
+  colSun.forEach(function(x){ all.push([x[0],'Colour','SUNSHINE',x[1]]); });
+  colAdpl.forEach(function(x){ all.push([x[0],'Colour','ADPL',x[1]]); });
+  chem.forEach(function(x){ all.push([x[0],'Chemical','',x[1]]); });
+  printing.forEach(function(x){ all.push([x[0],'Chemical','Printing',x[1]]); });
+  var sh=getSS().getSheetByName(COST_ITEMS_SHEET); var c=colMapOf_(COST_ITEMS_SHEET); var data=sh.getDataRange().getValues();
+  var norm=function(s){return String(s||'').trim().toLowerCase().replace(/\s+/g,' ');};
+  var exists={};
+  for(var i=1;i<data.length;i++){ if(String(data[i][c['active']]||'Yes').toLowerCase()==='no')continue; exists[norm(data[i][c['name']])+'|'+norm(data[i][c['category']])+'|'+norm(data[i][c['supplier']])]=true; }
+  var num=Math.max(0,sh.getLastRow()-1); var width=sh.getLastColumn(); var rows=[];
+  all.forEach(function(it){ var key=norm(it[0])+'|'+norm(it[1])+'|'+norm(it[2]); if(exists[key]){skipped++;return;} exists[key]=true; num++;
+    var row=new Array(width).fill(''); function s(k,v){if(c[k]!==undefined)row[c[k]]=v;}
+    s('item code','C-'+pad4(num));s('name',it[0]);s('category',it[1]);s('supplier',it[2]);s('rate',it[3]);s('unit','Kg');s('not in use','No');s('active','Yes');s('created by','SEED');s('created at',new Date());
+    rows.push(row); added++; });
+  if(rows.length) sh.getRange(sh.getLastRow()+1,1,rows.length,width).setValues(rows);
+  Logger.log('SEED COSTING done. Added: '+added+', Skipped(dupes): '+skipped);
+  return {added:added,skipped:skipped};
+}
+
+/* ======================= COSTING PASSWORD GATE (extra protection) ======================= */
+function _hashPw_(s){ return Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, 'romero|'+String(s))); }
+function costPwStatus(user){ const u=requireUser_(user); return {has:!!PropertiesService.getScriptProperties().getProperty('COSTING_PW_HASH'), admin:isAllAdmin_(user)}; }
+function setCostPassword(user, pw){ if(!isAllAdmin_(user)) throw new Error('Only admin can set costing password.'); pw=String(pw||'').trim(); if(pw.length<4) return {ok:false,msg:'Min 4 characters'}; PropertiesService.getScriptProperties().setProperty('COSTING_PW_HASH', _hashPw_(pw)); logAudit_(requireUser_(user),'Costing password set',''); return {ok:true}; }
+function checkCostPassword(user, pw){ requireUser_(user); const h=PropertiesService.getScriptProperties().getProperty('COSTING_PW_HASH'); if(!h) return {ok:false,nopw:true,msg:'No password set yet'}; return {ok: _hashPw_(String(pw||''))===h}; }
+
+/* ======================= ROLL FLOW — dept-wise forwarded/holding rolls ======================= */
+function getRollFlow(user){
+  requireUser_(user);
+  var led=getSS().getSheetByName(SHEETS.LEDGER).getDataRange().getValues();
+  var depts=['Raschel (Gray)','Pre-finishing','Printing','Post-finishing','Packing'];
+  var m={}; depts.forEach(function(d){m[d]={recv:0,fwd:0};});
+  for(var i=1;i<led.length;i++){ var dept=String(led[i][2]||''); if(!m[dept])continue;
+    m[dept].recv += Number(led[i][4])||0;
+    m[dept].fwd  += Number(led[i][6])||0;
+  }
+  return depts.map(function(d){ return {dept:d, recv:round(m[d].recv), fwd:round(m[d].fwd), holding:Math.max(0,round(m[d].recv-m[d].fwd))}; });
+}
+
+/* ======================= PO INWARD — guard receives against PO, bill entry, qty match auto-close ======================= */
+function setupPOInward_(){ var sh=getSS().getSheetByName(SHEETS.POLOG); if(!sh)return; ['Received Qty','PO Status','Bill No','Bill Amount','Bill Photo','Inward By','Inward Date','Items JSON','Received JSON'].forEach(function(cn){try{addColIfMissing_(sh,cn);}catch(e){}}); }
+function getOpenPOs(user){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.security&&!u.can.inward&&!u.can.purchase) throw new Error('No access');
+  setupPOInward_(); var sh=getSS().getSheetByName(SHEETS.POLOG); if(!sh)return {pos:[],admin:isAllAdmin_(user)};
+  var c=colMapOf_(SHEETS.POLOG); var d=sh.getDataRange().getValues(); var out=[]; var admin=isAllAdmin_(user);
+  for(var i=1;i<d.length;i++){ var status=String(d[i][c['po status']]||'Open')||'Open'; if(status==='Closed')continue;
+    var ordered=[]; try{ ordered=JSON.parse(d[i][c['items json']]||'[]'); }catch(e){}
+    if(!ordered.length){ ordered=[{item:String(d[i][c['part']]||''),qty:Number(d[i][c['qty']])||0}]; }
+    var recvMap={}; try{ recvMap=JSON.parse(d[i][c['received json']]||'{}'); }catch(e){}
+    var items=ordered.map(function(it){ var r={item:it.item}; if(admin){ r.ordered=it.qty; r.received=round(Number(recvMap[it.item])||0); r.verdict=(r.received===it.qty)?'ok':(r.received<it.qty?'short':'excess'); } return r; });
+    out.push({ poNo:String(d[i][c['po no']]), supplier:String(d[i][c['supplier']]||''), date:d[i][c['date']]?Utilities.formatDate(new Date(d[i][c['date']]),Session.getScriptTimeZone(),'dd-MMM-yyyy'):'', status:status, items:items, poUrl:String(d[i][c['po url']]||'') });
+  }
+  out.reverse(); return {pos:out, admin:admin};
+}
+function poInward(user, e){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.security&&!u.can.inward) throw new Error('No access');
+  setupPOInward_(); e=e||{}; var poNo=String(e.poNo||'').trim(); if(!poNo)return {ok:false,msg:'PO missing'};
+  if(!String(e.billNo||'').trim())return {ok:false,msg:'Bill No (invoice) is required'};
+  if(!(round(Number(e.billAmount)||0)>0))return {ok:false,msg:'Bill amount is required'};
+  var receipts=(e.receipts&&e.receipts.length)?e.receipts:[];
+  var sh=getSS().getSheetByName(SHEETS.POLOG); var c=colMapOf_(SHEETS.POLOG); var d=sh.getDataRange().getValues();
+  for(var i=1;i<d.length;i++){ if(String(d[i][c['po no']])===poNo){
+    if(String(d[i][c['po status']])==='Closed')return {ok:false,msg:'PO already closed'};
+    var ordered=[]; try{ ordered=JSON.parse(d[i][c['items json']]||'[]'); }catch(e2){}
+    if(!ordered.length){ ordered=[{item:String(d[i][c['part']]||''),qty:Number(d[i][c['qty']])||0}]; }
+    var recvMap={}; try{ recvMap=JSON.parse(d[i][c['received json']]||'{}'); }catch(e2){}
+    if(!receipts.length && Number(e.qtyReceived)>0){ receipts=[{item:ordered[0].item,qty:e.qtyReceived}]; }
+    var anyRecv=0;
+    receipts.forEach(function(rc){ var nm=String(rc.item||'').trim(); var q=round(Number(rc.qty)||0); if(!nm||!(q>0))return; recvMap[nm]=round((Number(recvMap[nm])||0)+q); anyRecv+=q; });
+    if(!(anyRecv>0))return {ok:false,msg:'Kisi item ki qty daalo'};
+    var allExact=true, anyOver=false, totRecv=0;
+    ordered.forEach(function(it){ var r=round(Number(recvMap[it.item])||0); totRecv+=r; if(r!==it.qty)allExact=false; if(r>it.qty)anyOver=true; });
+    var status = allExact ? 'Closed' : (anyOver ? 'Over (admin)' : 'Partial');
+    var photoUrl=e.photo?savePhotoTo_(e.photo,poNo+'_bill_'+Date.now()+'.jpg','Romero Gate Photos'):'';
+    var r=i+1;
+    sh.getRange(r,c['received json']+1).setValue(JSON.stringify(recvMap));
+    sh.getRange(r,c['received qty']+1).setValue(round(totRecv));
+    sh.getRange(r,c['po status']+1).setValue(status);
+    sh.getRange(r,c['bill no']+1).setValue(String(e.billNo).trim());
+    sh.getRange(r,c['bill amount']+1).setValue(round(Number(e.billAmount)||0));
+    if(photoUrl)sh.getRange(r,c['bill photo']+1).setValue(photoUrl);
+    sh.getRange(r,c['inward by']+1).setValue(u.name);
+    sh.getRange(r,c['inward date']+1).setValue(new Date());
+    receipts.forEach(function(rc){ var nm=String(rc.item||'').trim(); var q=round(Number(rc.qty)||0); if(!nm||!(q>0))return; _poRcvLog_(poNo, String(d[i][c['supplier']]||''), nm, q, String(e.billNo||'').trim(), round(Number(e.billAmount)||0), photoUrl, String(d[i][c['po url']]||''), u.name); });
+    var repId=(c['repair id']!==undefined)?String(d[i][c['repair id']]||'').trim():'';
+    if(status==='Closed'&&repId){ try{ var rf=findRepairRow_(repId); if(rf){ rf.sh.getRange(rf.row,8).setValue('Inward Done'); rf.sh.getRange(rf.row,11).setValue(u.name); rf.sh.getRange(rf.row,12).setValue(new Date()); } }catch(e3){} }
+    logAudit_(u,'PO Inward',poNo+' · '+status);
+    return {ok:true, status:status, autoClosed:(status==='Closed')};
+  }}
+  return {ok:false,msg:'PO not found'};
+}
+function poCloseAdmin(user, poNo){
+  if(!isAllAdmin_(user)) throw new Error('Only admin can close this PO.');
+  setupPOInward_(); var sh=getSS().getSheetByName(SHEETS.POLOG); var c=colMapOf_(SHEETS.POLOG); var d=sh.getDataRange().getValues();
+  for(var i=1;i<d.length;i++){ if(String(d[i][c['po no']])===String(poNo)){ sh.getRange(i+1,c['po status']+1).setValue('Closed'); logAudit_(requireUser_(user),'PO Closed (admin)',String(poNo)); return {ok:true}; } }
+  return {ok:false,msg:'Not found'};
+}
+
+/* ======================= RAW MATERIAL PURCHASE — standalone PO, receipts, without-PO, bill list ======================= */
+const PORCV_SHEET='PO RECEIPTS';
+function setupPORcv_(){ var ss=getSS(); if(!ss.getSheetByName(PORCV_SHEET)){ var s=ss.insertSheet(PORCV_SHEET); s.appendRow(['Date','PO No','Supplier','Item','Qty Received','Bill No','Bill Amount','Bill Photo','PO URL','By','Timestamp']); s.setFrozenRows(1); } }
+function _poCanCreate(user){ var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.purchase) throw new Error('Only Purchase permission can create PO.'); return u; }
+function createRawPO(user, e){
+  var u=_poCanCreate(user); setupPOInward_(); e=e||{};
+  var supplier=String(e.supplier||'').trim(); if(!supplier) return {ok:false,msg:'Enter supplier'};
+  var items=[];
+  if(e.items&&e.items.length){ e.items.forEach(function(it){ var nm=String(it.item||'').trim(); var q=round(Number(it.qty)||0); if(!nm||!(q>0))return; var pr=round(Number(it.rate!=null?it.rate:it.unitPrice)||0); var g=round(Number(it.gst!=null?it.gst:it.gstPct)||0); items.push({item:nm,qty:q,unitPrice:pr,gstPct:g,taxable:round(q*pr)}); }); }
+  else { var nm=String(e.item||'').trim(); var q=round(Number(e.qty)||0); if(nm&&q>0){ var pr=round(Number(e.unitPrice)||0),g=round(Number(e.gstPct)||0); items.push({item:nm,qty:q,unitPrice:pr,gstPct:g,taxable:round(q*pr)}); } }
+  if(!items.length) return {ok:false,msg:'Kam se kam ek item + qty daalo'};
+  var taxable=0,total=0; items.forEach(function(it){ taxable+=it.taxable; total+=it.taxable+round(it.taxable*it.gstPct/100); });
+  taxable=round(taxable); total=round(total);
+  var log=getSS().getSheetByName(SHEETS.POLOG); var poNo=String(e.poNo||'').trim() || ('RPO-'+pad4(Math.max(0,log.getLastRow()-1)+1));
+  var url=makePO_({ poNo:poNo, date:Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'dd-MMM-yyyy'), deliveryDays:e.deliveryDays||'', supplier:supplier, supplierGstin:String(e.supplierGstin||'').trim(), supplierPhone:String(e.supplierPhone||'').trim(), items:items, taxable:taxable, total:total, remark:String(e.remark||'').trim() });
+  var summary=items.map(function(it){return it.item+' ('+it.qty+')';}).join(', '); var totalQty=0; items.forEach(function(it){totalQty+=it.qty;});
+  var c=colMapOf_(SHEETS.POLOG); var arr=new Array(log.getLastColumn()).fill('');
+  function s(k,v){if(c[k]!==undefined)arr[c[k]]=v;}
+  s('po no',poNo);s('date',new Date());s('repair id','');s('supplier',supplier);s('supplier gstin',String(e.supplierGstin||'').trim());s('supplier phone',String(e.supplierPhone||'').trim());s('part',summary);s('qty',totalQty);s('total',total);s('delivery days',e.deliveryDays||'');s('remark',String(e.remark||'').trim());s('created by',u.name);s('po url',url);s('received qty',0);s('po status','Open');s('items json',JSON.stringify(items));s('received json','{}');
+  log.appendRow(arr);
+  logAudit_(u,'Raw PO',poNo+' · '+items.length+' items · '+total);
+  return {ok:true,poNo:poNo,url:url,total:total};
+}
+function purchaseNoPO(user, e){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.security&&!u.can.inward) throw new Error('No access');
+  setupPORcv_(); e=e||{};
+  var item=String(e.item||'').trim(); if(!item) return {ok:false,msg:'Enter item'};
+  var qty=round(Number(e.qty)||0); if(!(qty>0)) return {ok:false,msg:'Enter qty'};
+  var photoUrl=e.photo?savePhotoTo_(e.photo,'NOPO_'+Date.now()+'.jpg','Romero Gate Photos'):'';
+  getSS().getSheetByName(PORCV_SHEET).appendRow([new Date(),'— (No PO)',String(e.supplier||'').trim(),item,qty,String(e.billNo||'').trim(),round(Number(e.billAmount)||0),photoUrl,'',u.name,new Date()]);
+  logAudit_(u,'Purchase no-PO',item+' · '+qty);
+  return {ok:true};
+}
+function _poRcvLog_(poNo,supplier,item,qty,billNo,billAmt,photoUrl,poUrl,by){ setupPORcv_(); getSS().getSheetByName(PORCV_SHEET).appendRow([new Date(),poNo,supplier,item,qty,billNo,billAmt,photoUrl,poUrl||'',by,new Date()]); }
+function getBillList(user, q){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.security&&!u.can.inward&&!u.can.purchase) throw new Error('No access');
+  setupPORcv_(); var sh=getSS().getSheetByName(PORCV_SHEET); var d=sh.getDataRange().getValues(); var out=[];
+  q=String(q||'').trim().toLowerCase();
+  for(var i=1;i<d.length;i++){ var row={ date:d[i][0]?Utilities.formatDate(new Date(d[i][0]),Session.getScriptTimeZone(),'dd-MMM-yyyy'):'', poNo:String(d[i][1]||''), supplier:String(d[i][2]||''), item:String(d[i][3]||''), qty:d[i][4], billNo:String(d[i][5]||''), billAmount:d[i][6], photo:String(d[i][7]||''), poUrl:String(d[i][8]||''), by:String(d[i][9]||'') };
+    if(q){ var hay=(row.poNo+' '+row.supplier+' '+row.item+' '+row.billNo).toLowerCase(); if(hay.indexOf(q)<0)continue; }
+    out.push(row); }
+  out.reverse(); return {bills:out.slice(0,200)};
+}
+
+/* ======================= PO DETAIL — click to see full info ======================= */
+function getPODetail(user, poNo){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.purchase) throw new Error('No access');
+  setupPOInward_(); setupPORcv_();
+  var sh=getSS().getSheetByName(SHEETS.POLOG); var c=colMapOf_(SHEETS.POLOG); var d=sh.getDataRange().getValues();
+  for(var i=1;i<d.length;i++){ if(String(d[i][c['po no']])===String(poNo)){
+    var ordered=[]; try{ordered=JSON.parse(d[i][c['items json']]||'[]');}catch(e){}
+    if(!ordered.length) ordered=[{item:String(d[i][c['part']]||''),qty:Number(d[i][c['qty']])||0}];
+    var recvMap={}; try{recvMap=JSON.parse(d[i][c['received json']]||'{}');}catch(e){}
+    var items=ordered.map(function(it){ var r=round(Number(recvMap[it.item])||0); return {item:it.item, ordered:it.qty, received:r, pending:round(it.qty-r), verdict:(r===it.qty?'ok':(r<it.qty?'short':'excess'))}; });
+    var rc=getSS().getSheetByName(PORCV_SHEET).getDataRange().getValues(); var hist=[];
+    for(var j=1;j<rc.length;j++){ if(String(rc[j][1])===String(poNo)){ hist.push({date:rc[j][0]?Utilities.formatDate(new Date(rc[j][0]),Session.getScriptTimeZone(),'dd-MMM-yyyy'):'', item:String(rc[j][3]||''), qty:rc[j][4], billNo:String(rc[j][5]||''), billAmount:rc[j][6]}); } }
+    hist.reverse();
+    return {ok:true, poNo:String(poNo), supplier:String(d[i][c['supplier']]||''), date:d[i][c['date']]?Utilities.formatDate(new Date(d[i][c['date']]),Session.getScriptTimeZone(),'dd-MMM-yyyy'):'', total:Number(d[i][c['total']])||0, billAmount:Number(d[i][c['bill amount']])||0, billNo:String(d[i][c['bill no']]||''), status:String(d[i][c['po status']]||'Open'), poUrl:String(d[i][c['po url']]||''), billPhoto:String(d[i][c['bill photo']]||''), inwardBy:String(d[i][c['inward by']]||''), items:items, receipts:hist, admin:isAllAdmin_(user) };
+  }}
+  return {ok:false,msg:'PO not found'};
+}
+
+/* ======================= ORDER DETAIL — click to see full info ======================= */
+function getOrderDetail(user, orderId){
+  var u=requireUser_(user); if(!(u.can.order_entry||u.can.dispatch||u.can.packing)) throw new Error('No order access.');
+  ensureOrders_(); var od=getSS().getSheetByName(SHEETS.ORDERS).getDataRange().getValues(); var m=ordCol_();
+  for(var i=1;i<od.length;i++){ if(String(od[i][m['order id']])===String(orderId)){
+    var orow=od[i]; var s=orderSummary_(orow,m);
+    return {ok:true, orderId:String(orderId), customer:String(orow[m['customer']]||''), date:dateKey(orow[m['date']]), status:String(orow[m['status']]||''),
+      billTo:(m['bill to']!==undefined?String(orow[m['bill to']]||''):''), shipTo:(m['ship to']!==undefined?String(orow[m['ship to']]||''):''),
+      perQuality:s.perQuality, totalOrdered:s.totalOrdered, totalDispatched:s.totalDispatched, totalPending:s.totalPending,
+      history:s.history.map(function(h){return {date:h.date, dispatchId:h.dispatchId, slipNo:h.slipNo, bags:h.bags, weight:h.weight, url:h.url};}) };
+  }}
+  return {ok:false,msg:'Order not found'};
+}
+
+/* ======================= NL COMMAND — "show me pending PO / rhino pending" ======================= */
+function queryCommand(user, text){
+  var q=String(text||'').toLowerCase().trim(); if(!q) return {type:'none'};
+  var isPO=(/\bpo\b/.test(q)||q.indexOf('purchase order')>=0);
+  if(isPO){
+    var res=getOpenPOs(user); var pos=res.pos||[]; var label='Open POs';
+    if(q.indexOf('incomplete')>=0||q.indexOf('partial')>=0){ pos=pos.filter(function(p){return p.status==='Partial';}); label='Incomplete POs'; }
+    else if(q.indexOf('over')>=0||q.indexOf('zyada')>=0){ pos=pos.filter(function(p){return String(p.status).indexOf('Over')>=0;}); label='Over POs (admin close)'; }
+    return {type:'po', label:label, pos:pos.map(function(p){return {poNo:p.poNo,supplier:p.supplier,date:p.date,status:p.status};})};
+  }
+  var canOrd=false; try{ var uu=requireUser_(user); canOrd=(uu.can.order_entry||uu.can.dispatch||uu.can.packing||isAllAdmin_(user)); }catch(e){}
+  if(!canOrd) return {type:'none'};
+  var pend=getPendingOrders(user);
+  var qual=null; (pend.item||[]).forEach(function(it){ var nm=String(it.quality).toLowerCase(); var first=nm.split(' ')[0]; if(q.indexOf(nm)>=0||(first.length>2&&q.indexOf(first)>=0)) qual=it.quality; });
+  if(qual){
+    var parties=[]; var total=0;
+    (pend.orders||[]).forEach(function(o){ (o.items||[]).forEach(function(x){ if(x.quality===qual&&x.pending>0){ parties.push({customer:o.customer,orderId:o.id,date:o.date,pending:x.pending,unit:x.unit}); total+=x.pending; } }); });
+    return {type:'quality', quality:qual, total:total, parties:parties};
+  }
+  if(q.indexOf('pending')>=0||q.indexOf('order')>=0){
+    return {type:'pending', party:pend.party||[], orders:(pend.orders||[]).map(function(o){return {id:o.id,customer:o.customer,date:o.date,totalPending:o.totalPending,items:o.items};})};
+  }
+  return {type:'none'};
+}
+
+/* ======================= RM STORE (raw material — 500+ SKU) ======================= */
+const RM_ITEMS_SHEET='RM ITEMS';
+const RM_TXN_SHEET='RM TXN';
+const RM_IMS_ID='1VXDrfjf36g5pjjOcm5KipV-qJqX_ZQvs-Zs3vu2VStY';
+function setupRM_(){
+  if(_SETUP.rm) return; _SETUP.rm=true;
+  const ss=getSS();
+  if(!ss.getSheetByName(RM_ITEMS_SHEET)){
+    const s=ss.insertSheet(RM_ITEMS_SHEET);
+    const h=['SKU','Item Name','Category','Unit','Opening Stock','Reorder Point','Active'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+  if(!ss.getSheetByName(RM_TXN_SHEET)){
+    const s=ss.insertSheet(RM_TXN_SHEET);
+    const h=['Timestamp','SKU','Item Name','Direction','Qty','Date','By','Dept / Batch','Reference','Note'];
+    s.getRange(1,1,1,h.length).setValues([h]).setFontWeight('bold').setBackground('#0f2942').setFontColor('#ffffff'); s.setFrozenRows(1);
+  }
+}
+function _rmItemsMap_(){
+  setupRM_(); var sh=getSS().getSheetByName(RM_ITEMS_SHEET); var d=sh.getDataRange().getValues(); var m={};
+  for(var i=1;i<d.length;i++){ var sku=String(d[i][0]||'').trim(); if(!sku) continue; m[sku]={item:String(d[i][1]||''),cat:String(d[i][2]||'')||'Other',unit:String(d[i][3]||''),opening:Number(d[i][4])||0,reorder:Number(d[i][5])||0,active:String(d[i][6]||'Yes')}; }
+  return m;
+}
+function importRMStore(user){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.purchase) throw new Error('Import sirf PO/purchase wale kar sakte hain.');
+  setupRM_();
+  var src; try{ src=SpreadsheetApp.openById(RM_IMS_ID); }catch(e){ return {ok:false,msg:'IMS file open nahi hui: '+e.message}; }
+  var sheets=src.getSheets(); var found=null;
+  for(var s=0;s<sheets.length;s++){ var lc=sheets[s].getLastColumn(); if(lc<5) continue; var r1=sheets[s].getRange(1,1,1,lc).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();});
+    if(r1[0]==='sku code' && r1.indexOf('closing stock')>=0){ found=sheets[s]; break; } }
+  if(!found) return {ok:false,msg:'Daily closing-stock tab nahi mila IMS me.'};
+  var hv=found.getRange(1,1,1,found.getLastColumn()).getValues()[0].map(function(x){return String(x||'').trim().toLowerCase();});
+  var iSku=hv.indexOf('sku code'), iName=hv.indexOf('item name'), iMax=hv.indexOf('max level'), iCat=hv.indexOf('category'), iClose=hv.indexOf('closing stock');
+  var data=found.getDataRange().getValues(); var rows=[]; var seen={};
+  for(var i=1;i<data.length;i++){ var sku=String(data[i][iSku]||'').trim(); if(!sku||seen[sku]) continue; seen[sku]=1;
+    var name=String(data[i][iName]||'').trim(); var cat=String(data[i][iCat]||'').trim()||'Other'; var mx=Number(data[i][iMax])||0; var op=Number(data[i][iClose])||0;
+    rows.push([sku,name,cat,'',op,mx,'Yes']); }
+  if(!rows.length) return {ok:false,msg:'Koi row nahi mili.'};
+  var sh=getSS().getSheetByName(RM_ITEMS_SHEET);
+  if(sh.getLastRow()>1) sh.getRange(2,1,sh.getLastRow()-1,7).clearContent();
+  sh.getRange(2,1,rows.length,7).setValues(rows);
+  logAudit_(u,'RM Import',rows.length+' items');
+  return {ok:true,count:rows.length};
+}
+function getRMStock(user){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.store) throw new Error('No store access.');
+  var items=_rmItemsMap_();
+  var tsh=getSS().getSheetByName(RM_TXN_SHEET); var td=tsh.getDataRange().getValues();
+  var io={}; for(var i=1;i<td.length;i++){ var sku=String(td[i][1]||'').trim(); if(!sku) continue; var dir=String(td[i][3]||''); var q=Number(td[i][4])||0; io[sku]=(io[sku]||0)+(dir==='OUT'?-q:q); }
+  var cats={}, list=[], low=[];
+  Object.keys(items).forEach(function(sku){ var it=items[sku]; if(String(it.active).toLowerCase()==='no') return;
+    var stock=round(it.opening+(io[sku]||0)); var health='none', pct=null;
+    if(it.reorder>0){ pct=Math.round(stock/it.reorder*100); health=(pct<=33?'red':(pct<=66?'yellow':(pct<=100?'green':'purple'))); }
+    var rec={sku:sku,item:it.item,cat:it.cat,unit:it.unit,stock:stock,reorder:it.reorder,health:health,pct:pct};
+    list.push(rec); cats[it.cat]=(cats[it.cat]||0)+1;
+    if(it.reorder>0 && stock<=it.reorder*0.33) low.push(rec);
+  });
+  list.sort(function(a,b){ return a.cat.localeCompare(b.cat)||a.item.localeCompare(b.item); });
+  low.sort(function(a,b){return (a.pct||0)-(b.pct||0);});
+  var catArr=Object.keys(cats).sort().map(function(c){return {cat:c,count:cats[c]};});
+  return {ok:true, items:list, cats:catArr, low:low, total:list.length};
+}
+function rmMove_(user,e,dir){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.store) throw new Error('No store access.');
+  setupRM_(); e=e||{}; var sku=String(e.sku||'').trim(); var qty=Number(e.qty)||0;
+  if(!sku) return {ok:false,msg:'SKU select karo'}; if(qty<=0) return {ok:false,msg:'Qty daalo'};
+  var items=_rmItemsMap_(); var it=items[sku]; if(!it) return {ok:false,msg:'SKU nahi mila'};
+  getSS().getSheetByName(RM_TXN_SHEET).appendRow([new Date(),sku,it.item,dir,round(qty),new Date(),u.name,String(e.dept||''),String(e.lot||e.ref||''),String(e.note||'')]);
+  logAudit_(u,'RM '+dir,sku+' '+qty+(e.lot?(' · '+e.lot):'')); return {ok:true};
+}
+function rmIssue(user,e){ return rmMove_(user,e,'OUT'); }
+function rmReceive(user,e){ var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.purchase) return {ok:false,msg:'Receive (IN) sirf PO/purchase wale kar sakte hain.'}; return rmMove_(user,e,'IN'); }
+function getRMHistory(user, sku){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.store) throw new Error('No store access.');
+  setupRM_(); sku=String(sku||'').trim();
+  var d=getSS().getSheetByName(RM_TXN_SHEET).getDataRange().getValues(); var out=[];
+  for(var i=1;i<d.length;i++){ if(String(d[i][1]||'').trim()!==sku) continue;
+    out.push({date:d[i][5]?Utilities.formatDate(new Date(d[i][5]),Session.getScriptTimeZone(),'dd-MMM'):'', dir:String(d[i][3]||''), qty:d[i][4], by:String(d[i][6]||''), dept:String(d[i][7]||''), note:String(d[i][9]||'')}); }
+  out.reverse();
+  var items=_rmItemsMap_(); var it=items[sku]||{};
+  return {ok:true, sku:sku, item:it.item||'', history:out.slice(0,60)};
+}
+
+/* ======================= LOT BOM + STORE CHECK (RHINO first) ======================= */
+var RM_BOM = {
+  'RHINO (L)': { pcsPerRoll:23, satinGpp:200, labels:[{sku:'RM-LA--L3',name:'Rhino Label'},{sku:'RM-LA--P7',name:'Woven Parix Label'}], polybag:{sku:'RM-PO-30-31',name:'Polybag Pink 30x32'}, bora:{sku:'RM-BA--P2',name:'Print Bardana'}, pcsPerBora:8 }
+};
+function _rmStockMap_(){
+  setupRM_(); var im=_rmItemsMap_();
+  var td=getSS().getSheetByName(RM_TXN_SHEET).getDataRange().getValues(); var io={};
+  for(var i=1;i<td.length;i++){ var sku=String(td[i][1]||'').trim(); if(!sku) continue; io[sku]=(io[sku]||0)+((String(td[i][3])==='OUT')?-(Number(td[i][4])||0):(Number(td[i][4])||0)); }
+  var out={}; Object.keys(im).forEach(function(s){ out[s]=round((im[s].opening||0)+(io[s]||0)); });
+  return {stock:out, items:im};
+}
+function _parseSatin_(s){
+  s=String(s||'').trim(); if(!s) return [];
+  if(s.charAt(0)==='['){ try{ var a=JSON.parse(s); return (a||[]).map(function(x){return {sku:String(x.sku||'').trim(),kg:Number(x.kg)||0};}).filter(function(x){return x.sku;}); }catch(e){ return []; } }
+  return [{sku:s,kg:0}];
+}
+function _bomLines_(item, rolls, satinArg, sm){
+  var b=RM_BOM[item]; if(!b) return null;
+  var pcs=Math.round(rolls*b.pcsPerRoll);
+  var st=sm||_rmStockMap_(); var stock=st.stock, items=st.items;
+  var lines=[];
+  function line(name,sku,need,unit){ var have=(sku&&stock[sku]!=null)?stock[sku]:null; lines.push({name:name,sku:sku||'',need:round(need),unit:unit,have:(have==null?null:round(have)),ok:(have==null?null:(have>=need))}); }
+  var satinTarget=round(pcs*b.satinGpp/1000);
+  var satins=(typeof satinArg==='string')?_parseSatin_(satinArg):(satinArg||[]);
+  var satinEntered=0;
+  if(satins.length){ satins.forEach(function(x){ var nm=(items[x.sku]?items[x.sku].item:'Satin'); satinEntered+=(Number(x.kg)||0); line(nm, x.sku, Number(x.kg)||0, 'kg'); }); }
+  else { line('Satin (SKU pending)', '', satinTarget, 'kg'); }
+  b.labels.forEach(function(l){ line(l.name, l.sku, pcs, 'pcs'); });
+  line(b.polybag.name, b.polybag.sku, pcs, 'pcs');
+  line(b.bora.name, b.bora.sku, Math.ceil(pcs/b.pcsPerBora), 'pcs');
+  var anyShort=lines.some(function(l){return l.ok===false;});
+  return {pcs:pcs, lines:lines, anyShort:anyShort, satinTarget:satinTarget, satinEntered:round(satinEntered)};
+}
+function getLotBOM(user, item, rolls, satinJson){
+  requireUser_(user);
+  item=String(item||'').trim(); rolls=Number(rolls)||0;
+  if(!RM_BOM[item]) return {ok:true, supported:false};
+  if(!(rolls>0)) return {ok:false,msg:'rolls'};
+  var r=_bomLines_(item, rolls, satinJson, _rmStockMap_());
+  return {ok:true, supported:true, item:item, rolls:rolls, pcs:r.pcs, lines:r.lines, anyShort:r.anyShort, satinTarget:r.satinTarget, satinEntered:r.satinEntered};
+}
+function getLotStoreView(user, lotId){
+  var u=requireUser_(user); setupLots(); setupRM_();
+  lotId=String(lotId||'').trim();
+  var sh=getSS().getSheetByName(LOTS_SHEET); var c=lotCols_(sh); var d=sh.getDataRange().getValues();
+  var row=null; for(var i=1;i<d.length;i++){ if(String(d[i][c.id])===lotId){ row=d[i]; break; } }
+  if(!row) return {ok:false,msg:'Lot not found'};
+  var item=String(row[c.item]||'').trim(); var rolls=Number(row[c.size])||0; var satinSku=(c.satinSku>=0?String(row[c.satinSku]||'').trim():'');
+  var sm=_rmStockMap_();
+  var bom=_bomLines_(item, rolls, satinSku, sm);
+  // issued against this lot (RM TXN reference == lotId)
+  var td=getSS().getSheetByName(RM_TXN_SHEET).getDataRange().getValues(); var issued={}; var moves=[];
+  for(var j=1;j<td.length;j++){ if(String(td[j][8]||'').trim()!==lotId) continue;
+    var sku=String(td[j][1]||''); var dir=String(td[j][3]||''); var q=Number(td[j][4])||0;
+    issued[sku]=(issued[sku]||0)+((dir==='OUT')?q:-q);
+    moves.push({date:td[j][5]?Utilities.formatDate(new Date(td[j][5]),Session.getScriptTimeZone(),'dd-MMM'):'',item:String(td[j][2]||''),dir:dir,qty:q,by:String(td[j][6]||'')});
+  }
+  moves.reverse();
+  var lines=null;
+  if(bom){ lines=bom.lines.map(function(l){ var iss=round(issued[l.sku]||0); return {name:l.name,sku:l.sku,need:l.need,unit:l.unit,issued:iss,pending:round(l.need-iss),have:l.have,ok:l.ok}; }); }
+  return {ok:true, lotId:lotId, item:item, rolls:rolls, supported:!!bom, pcs:(bom?bom.pcs:0), lines:lines, moves:moves };
+}
+
+/* ======================= LOTS TO ISSUE (store keeper view) ======================= */
+function getLotsToIssue(user){
+  var u=requireUser_(user); if(!isAllAdmin_(user)&&!u.can.store&&!u.can.purchase) throw new Error('No store access.');
+  setupLots(); setupRM_();
+  var sh=getSS().getSheetByName(LOTS_SHEET); var c=lotCols_(sh); var d=sh.getDataRange().getValues();
+  var prog=lotMovesSum_(); var sm=_rmStockMap_();
+  // issued map per lot from RM TXN
+  var td=getSS().getSheetByName(RM_TXN_SHEET).getDataRange().getValues(); var issuedByLot={};
+  for(var j=1;j<td.length;j++){ var lot=String(td[j][8]||'').trim(); if(!lot) continue; var sku=String(td[j][1]||''); var dir=String(td[j][3]||''); var q=Number(td[j][4])||0; if(!issuedByLot[lot])issuedByLot[lot]={}; issuedByLot[lot][sku]=(issuedByLot[lot][sku]||0)+((dir==='OUT')?q:-q); }
+  var out=[];
+  for(var i=1;i<d.length;i++){ var id=String(d[i][c.id]||'').trim(); if(!id) continue;
+    var st=lotStatusOf_(d[i],c,prog[id]); if(st.done) continue; // only open lots
+    var item=String(d[i][c.item]||'').trim(); var rolls=Number(d[i][c.size])||0;
+    var satin=(c.satinSku>=0?String(d[i][c.satinSku]||''):'');
+    var bom=_bomLines_(item, rolls, satin, sm);
+    if(!bom) continue; // only lots that have a BOM (RHINO etc.)
+    var iss=issuedByLot[id]||{};
+    var lines=bom.lines.map(function(l){ var gi=round(iss[l.sku]||0); return {name:l.name,sku:l.sku,need:l.need,unit:l.unit,issued:gi,pending:round(l.need-gi),have:l.have,ok:l.ok}; });
+    var anyPending=lines.some(function(l){return l.pending>0.001;});
+    out.push({lotId:id,item:item,rolls:rolls,pcs:bom.pcs,stage:st.stage,lines:lines,anyShort:bom.anyShort,anyPending:anyPending});
+  }
+  out.reverse();
+  return {ok:true, lots:out, canReceive:(isAllAdmin_(user)||u.can.purchase)};
+}
+
+/* ======================= SATIN SKU LIST (for lot create dropdown) ======================= */
+function getSatinSkus(user){
+  requireUser_(user); setupRM_();
+  var d=getSS().getSheetByName(RM_ITEMS_SHEET).getDataRange().getValues(); var out=[];
+  for(var i=1;i<d.length;i++){ var cat=String(d[i][2]||'').toLowerCase(); if(cat.indexOf('satin')<0) continue; var sku=String(d[i][0]||'').trim(); if(!sku) continue; if(String(d[i][6]||'Yes').toLowerCase()==='no') continue; out.push({sku:sku,item:String(d[i][1]||'')}); }
+  return {ok:true, items:out};
+}
+
